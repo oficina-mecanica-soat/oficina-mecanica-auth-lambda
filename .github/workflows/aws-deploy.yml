@@ -360,20 +360,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          function_name="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -raw auth_lambda_function_name 2>/dev/null || true)"
-
+          function_name="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -json | jq -r '.auth_lambda_function_name.value // empty')"
           if [ -z "$function_name" ]; then
-            function_name="$(aws ssm get-parameter --name "$SSM_AUTH_LAMBDA_PREFIX/function_name" --query 'Parameter.Value' --output text 2>/dev/null || true)"
-          fi
-
-          if [ -z "$function_name" ]; then
-            echo "::warning::Nome da Auth Lambda ausente no state/SSM. Continuando como recuperação de destroy parcial."
-          else
-            if aws lambda get-function-configuration --function-name "$function_name" --query 'FunctionName' --output text >/dev/null 2>&1; then
-              echo "Auth Lambda $function_name existe e será validada após destroy."
+            if ssm_output="$(aws ssm get-parameter --name "$SSM_AUTH_LAMBDA_PREFIX/function_name" --query 'Parameter.Value' --output text 2>&1)"; then
+              function_name="$ssm_output"
+            elif [[ "$ssm_output" == *"(ParameterNotFound)"* ]]; then
+              function_name="oficina-mecanica-auth-lambda-dev"
             else
-              echo "::warning::Auth Lambda $function_name já está ausente. Continuando como recuperação de destroy parcial."
+              echo "::error::Falha ao consultar SSM; ausência não comprovada."
+              exit 1
             fi
+          fi
+          if function_output="$(aws lambda get-function-configuration --function-name "$function_name" --query 'FunctionName' --output text 2>&1)"; then
+            echo "Auth Lambda existe e será validada após destroy."
+          elif [[ "$function_output" == *"(ResourceNotFoundException)"* ]]; then
+            echo "Auth Lambda comprovadamente ausente."
+          else
+            echo "::error::Falha ao consultar Lambda; ausência não comprovada."
+            exit 1
           fi
 
           echo "function_name_before_destroy=$function_name" >> "$GITHUB_OUTPUT"
