@@ -121,6 +121,7 @@ jobs:
 
       - name: "🔑 02 · Configurar credenciais AWS"
         uses: aws-actions/configure-aws-credentials@v6
+        id: aws_credentials
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -231,9 +232,9 @@ jobs:
           path: |
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
-          key: tfstate-auth-lambda-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: tfstate-auth-lambda-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            tfstate-auth-lambda-${{ inputs.environment_name }}-
+            tfstate-auth-lambda-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-
 
       - name: "📚 08 · Resolver dependências da solução"
         run: dotnet restore "$SOLUTION_PATH"
@@ -344,6 +345,9 @@ jobs:
           target.write_text(json.dumps(values), encoding="utf-8")
           PY
 
+      - name: "🛡️ Validar state da conta AWS atual"
+        run: node .github/scripts/bootstrap-account-state.cjs
+
       - name: "🛡️ Preparar configuração exclusiva de destroy"
         if: env.TERRAFORM_ACTION == 'destroy'
         run: node .github/scripts/prepare-destroy.cjs
@@ -396,9 +400,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          function_arn="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -raw auth_lambda_function_arn 2>/dev/null || true)"
-          function_name="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -raw auth_lambda_function_name 2>/dev/null || true)"
-          security_group_id="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -raw auth_lambda_security_group_id 2>/dev/null || true)"
+          function_arn="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -json | jq -r '.auth_lambda_function_arn.value // empty')"
+          function_name="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -json | jq -r '.auth_lambda_function_name.value // empty')"
+          security_group_id="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -json | jq -r '.auth_lambda_security_group_id.value // empty')"
 
           echo "function_arn=$function_arn" >> "$GITHUB_OUTPUT"
           echo "function_name=$function_name" >> "$GITHUB_OUTPUT"
@@ -449,6 +453,7 @@ jobs:
 
       - name: "🔑 02 · Configurar credenciais AWS"
         uses: aws-actions/configure-aws-credentials@v6
+        id: aws_credentials
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -467,9 +472,9 @@ jobs:
           path: |
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
-          key: tfstate-auth-lambda-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: tfstate-auth-lambda-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            tfstate-auth-lambda-${{ inputs.environment_name }}-
+            tfstate-auth-lambda-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-
 
       - name: "⬇️ 05 · Baixar plano do Terraform publicado"
         uses: actions/download-artifact@v8
@@ -564,6 +569,9 @@ jobs:
           target.write_text(json.dumps(values), encoding="utf-8")
           PY
 
+      - name: "🛡️ Validar state da conta AWS atual"
+        run: node .github/scripts/bootstrap-account-state.cjs
+
       - name: "🛡️ Preparar configuração exclusiva de destroy"
         if: env.TERRAFORM_ACTION == 'destroy'
         run: node .github/scripts/prepare-destroy.cjs
@@ -589,7 +597,7 @@ jobs:
           path: |
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
-          key: tfstate-auth-lambda-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: tfstate-auth-lambda-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: "🔐 12 · Popular API key no Secrets Manager"
         if: env.TERRAFORM_ACTION == 'apply'
