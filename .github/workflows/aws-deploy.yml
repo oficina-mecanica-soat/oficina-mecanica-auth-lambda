@@ -121,6 +121,7 @@ jobs:
 
       - name: "🔑 02 · Configurar credenciais AWS"
         uses: aws-actions/configure-aws-credentials@v6
+        id: aws_credentials
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -231,9 +232,9 @@ jobs:
           path: |
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
-          key: tfstate-auth-lambda-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: tfstate-auth-lambda-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            tfstate-auth-lambda-${{ inputs.environment_name }}-
+            tfstate-auth-lambda-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-
 
       - name: "📚 08 · Resolver dependências da solução"
         run: dotnet restore "$SOLUTION_PATH"
@@ -344,6 +345,13 @@ jobs:
           target.write_text(json.dumps(values), encoding="utf-8")
           PY
 
+      - name: "🛡️ Validar state da conta AWS atual"
+        run: node .github/scripts/bootstrap-account-state.cjs
+
+      - name: "🛡️ Preparar configuração exclusiva de destroy"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        run: node .github/scripts/prepare-destroy.cjs
+
       - name: "🚀 13 · Inicializar Terraform"
         run: terraform -chdir="$TF_WORKING_DIRECTORY" init -input=false
 
@@ -356,20 +364,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          function_name="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -raw auth_lambda_function_name 2>/dev/null || true)"
-
+          function_name="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -json | jq -r '.auth_lambda_function_name.value // empty')"
           if [ -z "$function_name" ]; then
-            function_name="$(aws ssm get-parameter --name "$SSM_AUTH_LAMBDA_PREFIX/function_name" --query 'Parameter.Value' --output text 2>/dev/null || true)"
-          fi
-
-          if [ -z "$function_name" ]; then
-            echo "::warning::Nome da Auth Lambda ausente no state/SSM. Continuando como recuperação de destroy parcial."
-          else
-            if aws lambda get-function-configuration --function-name "$function_name" --query 'FunctionName' --output text >/dev/null 2>&1; then
-              echo "Auth Lambda $function_name existe e será validada após destroy."
+            if ssm_output="$(aws ssm get-parameter --name "$SSM_AUTH_LAMBDA_PREFIX/function_name" --query 'Parameter.Value' --output text 2>&1)"; then
+              function_name="$ssm_output"
+            elif [[ "$ssm_output" == *"(ParameterNotFound)"* ]]; then
+              function_name="oficina-mecanica-auth-lambda-dev"
             else
-              echo "::warning::Auth Lambda $function_name já está ausente. Continuando como recuperação de destroy parcial."
+              echo "::error::Falha ao consultar SSM; ausência não comprovada."
+              exit 1
             fi
+          fi
+          if function_output="$(aws lambda get-function-configuration --function-name "$function_name" --query 'FunctionName' --output text 2>&1)"; then
+            echo "Auth Lambda existe e será validada após destroy."
+          elif [[ "$function_output" == *"(ResourceNotFoundException)"* ]]; then
+            echo "Auth Lambda comprovadamente ausente."
+          else
+            echo "::error::Falha ao consultar Lambda; ausência não comprovada."
+            exit 1
           fi
 
           echo "function_name_before_destroy=$function_name" >> "$GITHUB_OUTPUT"
@@ -388,9 +400,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          function_arn="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -raw auth_lambda_function_arn 2>/dev/null || true)"
-          function_name="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -raw auth_lambda_function_name 2>/dev/null || true)"
-          security_group_id="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -raw auth_lambda_security_group_id 2>/dev/null || true)"
+          function_arn="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -json | jq -r '.auth_lambda_function_arn.value // empty')"
+          function_name="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -json | jq -r '.auth_lambda_function_name.value // empty')"
+          security_group_id="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -json | jq -r '.auth_lambda_security_group_id.value // empty')"
 
           echo "function_arn=$function_arn" >> "$GITHUB_OUTPUT"
           echo "function_name=$function_name" >> "$GITHUB_OUTPUT"
@@ -441,6 +453,7 @@ jobs:
 
       - name: "🔑 02 · Configurar credenciais AWS"
         uses: aws-actions/configure-aws-credentials@v6
+        id: aws_credentials
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -459,9 +472,9 @@ jobs:
           path: |
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
-          key: tfstate-auth-lambda-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: tfstate-auth-lambda-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            tfstate-auth-lambda-${{ inputs.environment_name }}-
+            tfstate-auth-lambda-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-
 
       - name: "⬇️ 05 · Baixar plano do Terraform publicado"
         uses: actions/download-artifact@v8
@@ -556,11 +569,26 @@ jobs:
           target.write_text(json.dumps(values), encoding="utf-8")
           PY
 
+      - name: "🛡️ Validar state da conta AWS atual"
+        run: node .github/scripts/bootstrap-account-state.cjs
+
+      - name: "🛡️ Preparar configuração exclusiva de destroy"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        run: node .github/scripts/prepare-destroy.cjs
+
       - name: "🚀 09 · Inicializar Terraform"
         run: terraform -chdir="$TF_WORKING_DIRECTORY" init -input=false
 
+      - name: "🛡️ Validar plano exclusivo de destroy"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        run: node .github/scripts/prepare-destroy.cjs verify-plan
+
       - name: "✅ 10 · Aplicar plano do Terraform"
         run: terraform -chdir="$TF_WORKING_DIRECTORY" apply -input=false -auto-approve tfplan
+
+      - name: "🔎 Confirmar state sem recursos gerenciados"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        run: node .github/scripts/prepare-destroy.cjs verify-state
 
       - name: "💾 11 · Salvar cache final do state Terraform"
         if: always()
@@ -569,7 +597,7 @@ jobs:
           path: |
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
-          key: tfstate-auth-lambda-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: tfstate-auth-lambda-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: "🔐 12 · Popular API key no Secrets Manager"
         if: env.TERRAFORM_ACTION == 'apply'
