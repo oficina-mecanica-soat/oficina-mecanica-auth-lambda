@@ -378,3 +378,11 @@ O retorno isolado de terraform-action.env para apply ainda é reconhecido como m
 As chaves de cache incluem o ID da conta retornado pela autenticação AWS, antes do ambiente e da execução. A restauração só pesquisa esse escopo, sem fallback para chaves históricas sem conta. Os caches anteriores permanecem preservados como histórico do laboratório encerrado 058264466885, inclusive quando contêm referências que a conta atual não consegue consultar. AccessDenied não é convertido em ausência.
 
 Sem cache no escopo atual, a esteira bloqueia apply. Um destroy dedicado só pode iniciar state novo depois de consultas read-only confirmarem que não existem recursos ou contratos do projeto na conta atual. Recursos internos do laboratório são preservados. Depois disso, o plano exclusivo de destroy e a validação de state vazio produzem o cache usado pelas próximas execuções da mesma conta. Em laboratório com recursos existentes e cache ausente, é necessário recuperar o state correto; o bootstrap não libera provisionamento automático.
+
+## Bloqueio de operação AWS — AUD-001
+
+`AWS_DEPLOY_ENABLED` deve existir no nível do repositório e permanecer `false` enquanto o laboratório estiver offline. Ausente, vazio ou diferente de `true` bloqueia a operação. O caller exige a habilitação antes de chamar o deploy; o workflow reutilizável repete a conferência no Environment e aceita operação física somente em `develop`/`development`, antes de resolver a ação e acessar AWS. Um override no Environment não substitui a habilitação do caller.
+
+Habilitar a variável não autoriza operação por si só: ainda exige janela combinada com Gabriel, laboratório/credenciais atuais, dependências e os guardrails existentes de plano salvo/state e destroy dedicado. Não altera JWT, rotas, recursos, contratos SSM ou `terraform-action.env`. Merge de código não implanta.
+
+O CI executa a barreira real com flags ausentes/inválidas, branches/tags e ambientes indevidos, além do caso positivo, sem credenciais ou comandos AWS. Testes e validações ficam inline nos workflows existentes, sem novas pastas de scripts. Nesta rodada, integrar somente em `develop`; Gabriel realiza o merge. Não promover release/main ou abrir nova janela de laboratório para este ajuste.
