@@ -420,7 +420,7 @@ jobs:
       - name: "⬆️ 18 · Publicar plano do Terraform como artefato"
         uses: actions/upload-artifact@v7
         with:
-          name: tfplan-auth-lambda-${{ github.run_id }}
+          name: tfplan-auth-lambda-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.TF_WORKING_DIRECTORY }}/tfplan
           retention-days: 1
           if-no-files-found: error
@@ -428,7 +428,7 @@ jobs:
       - name: "⬆️ 19 · Publicar pacote da Lambda como artefato"
         uses: actions/upload-artifact@v7
         with:
-          name: auth-lambda-package-${{ github.run_id }}
+          name: auth-lambda-package-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.LAMBDA_PACKAGE_PATH }}
           retention-days: 1
           if-no-files-found: error
@@ -488,13 +488,13 @@ jobs:
       - name: "⬇️ 05 · Baixar plano do Terraform publicado"
         uses: actions/download-artifact@v8
         with:
-          name: tfplan-auth-lambda-${{ github.run_id }}
+          name: tfplan-auth-lambda-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.TF_WORKING_DIRECTORY }}
 
       - name: "⬇️ 06 · Baixar pacote da Lambda planejado"
         uses: actions/download-artifact@v8
         with:
-          name: auth-lambda-package-${{ github.run_id }}
+          name: auth-lambda-package-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/auth-lambda
 
       - name: "✅ 07 · Validar pacote baixado"
