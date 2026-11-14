@@ -1,3 +1,4 @@
+using OficinaMecanica.AuthLambda.Infrastructure.Atendimento.Options;
 using OficinaMecanica.AuthLambda.Infrastructure.Identidade.Options;
 
 namespace OficinaMecanica.AuthLambda.Function.Configuration;
@@ -6,10 +7,11 @@ internal sealed class AuthLambdaConfiguration
 {
     private const int DefaultExpirationMinutes = 60;
 
-    private AuthLambdaConfiguration(string connectionString, JwtOptions jwtOptions)
+    private AuthLambdaConfiguration(string connectionString, JwtOptions jwtOptions, ClientesApiOptions clientesApiOptions)
     {
         ConnectionString = connectionString;
         JwtOptions = jwtOptions;
+        ClientesApiOptions = clientesApiOptions;
     }
 
     public string ConnectionString
@@ -22,10 +24,24 @@ internal sealed class AuthLambdaConfiguration
         get;
     }
 
+    public ClientesApiOptions ClientesApiOptions { get; }
+
     public static AuthLambdaConfiguration Carregar()
     {
-        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__SqlServer");
-        if (string.IsNullOrWhiteSpace(connectionString))
+        var valorHabilitado = Environment.GetEnvironmentVariable("ClientesApi__Habilitado") ?? "false";
+        if (!bool.TryParse(valorHabilitado, out var habilitado))
+        {
+            throw new InvalidOperationException("Configuração da consulta privada de clientes inválida.");
+        }
+        var clientesApiOptions = new ClientesApiOptions
+        {
+            Habilitado = habilitado,
+            EnderecoBase = Environment.GetEnvironmentVariable("ClientesApi__EnderecoBase") ?? string.Empty,
+            Token = Environment.GetEnvironmentVariable("ClientesApi__Token") ?? string.Empty
+        };
+        clientesApiOptions.Validar();
+        var connectionString = habilitado ? string.Empty : Environment.GetEnvironmentVariable("ConnectionStrings__SqlServer");
+        if (!habilitado && string.IsNullOrWhiteSpace(connectionString))
         {
             throw new InvalidOperationException("Configuração de banco de dados ausente.");
         }
@@ -40,7 +56,7 @@ internal sealed class AuthLambdaConfiguration
 
         jwtOptions.Validar();
 
-        return new AuthLambdaConfiguration(connectionString, jwtOptions);
+        return new AuthLambdaConfiguration(connectionString ?? string.Empty, jwtOptions, clientesApiOptions);
     }
 
     private static int ObterExpirationMinutes()

@@ -24,6 +24,8 @@ env:
   SSM_VPC_STATUS_PARAMETER: /oficina-mecanica/development/status/vpc
   SSM_RDS_PREFIX: /oficina-mecanica/development/rds
   SSM_RDS_STATUS_PARAMETER: /oficina-mecanica/development/status/rds
+  SSM_KUBERNETES_PREFIX: /oficina-mecanica/development/kubernetes
+  SSM_API_STATUS_PARAMETER: /oficina-mecanica/development/status/api
   SSM_AUTH_LAMBDA_PREFIX: /oficina-mecanica/development/auth-lambda
   SSM_AUTH_LAMBDA_STATUS_PARAMETER: /oficina-mecanica/development/status/auth-lambda
   DD_VERSION: sha-${{ github.sha }}
@@ -119,6 +121,8 @@ jobs:
       TERRAFORM_ACTION: ${{ needs.resolve_action.outputs.terraform_action }}
       DD_API_KEY: ${{ secrets.DD_API_KEY }}
       AUTH_LAMBDA_JWT_SECRET: ${{ secrets.AUTH_LAMBDA_JWT_SECRET }}
+      CLIENTES_API_ENABLED: ${{ vars.CLIENTES_API_ENABLED || 'false' }}
+      CLIENTES_INTERNOS_TOKEN: ${{ secrets.CLIENTES_INTERNOS_TOKEN }}
       AUTH_LAMBDA_EXECUTION_ROLE_NAME: ${{ vars.AUTH_LAMBDA_EXECUTION_ROLE_NAME }}
       AUTH_LAMBDA_JWT_ISSUER: ${{ vars.AUTH_LAMBDA_JWT_ISSUER || 'oficina-mecanica-auth' }}
       AUTH_LAMBDA_JWT_AUDIENCE: ${{ vars.AUTH_LAMBDA_JWT_AUDIENCE || 'oficina-mecanica-api' }}
@@ -312,10 +316,53 @@ jobs:
               )
               return result.stdout.strip()
 
+          clientes_api_habilitada = False
+          clientes_api_endereco_base = ""
+          clientes_api_token = ""
+          if os.environ["TERRAFORM_ACTION"] != "destroy":
+              valor_habilitado = os.environ.get("CLIENTES_API_ENABLED", "false")
+              if valor_habilitado not in ("true", "false"):
+                  raise ValueError("CLIENTES_API_ENABLED deve ser true ou false.")
+              clientes_api_habilitada = valor_habilitado == "true"
+              if clientes_api_habilitada:
+                  clientes_api_token = os.environ.get("CLIENTES_INTERNOS_TOKEN", "")
+                  if not 32 <= len(clientes_api_token) <= 256 or any(not "!" <= c <= "~" for c in clientes_api_token):
+                      raise ValueError("Configure uma credencial técnica válida para a consulta privada de clientes.")
+                  if clientes_api_token == os.environ.get("AUTH_LAMBDA_JWT_SECRET"):
+                      raise ValueError("A credencial técnica deve ser segregada do JWT.")
+                  print(f"::add-mask::{clientes_api_token}")
+                  estado_api = aws_output("ssm", "get-parameter", "--name", os.environ["SSM_API_STATUS_PARAMETER"], "--query", "Parameter.Value", "--output", "text")
+                  if estado_api != "ready":
+                      raise ValueError("A API precisa estar ready antes de selecionar a consulta privada de clientes.")
+                  prefixo = os.environ["SSM_KUBERNETES_PREFIX"]
+                  listener_arn = aws_output("ssm", "get-parameter", "--name", f"{prefixo}/internal_nlb_listener_arn", "--query", "Parameter.Value", "--output", "text")
+                  nlb_sg = aws_output("ssm", "get-parameter", "--name", f"{prefixo}/internal_nlb_security_group_id", "--query", "Parameter.Value", "--output", "text")
+                  vpc_id = aws_output("ssm", "get-parameter", "--name", f"{os.environ['SSM_VPC_PREFIX']}/vpc_id", "--query", "Parameter.Value", "--output", "text")
+                  conta = aws_output("sts", "get-caller-identity", "--query", "Account", "--output", "text")
+                  if not listener_arn.startswith(f"arn:aws:elasticloadbalancing:{os.environ['AWS_REGION']}:{conta}:listener/net/"):
+                      raise ValueError("O listener privado deve pertencer à conta e região atuais.")
+                  listeners = json.loads(aws_output("elbv2", "describe-listeners", "--listener-arns", listener_arn, "--output", "json"))["Listeners"]
+                  if len(listeners) != 1 or listeners[0]["Protocol"] != "TCP" or listeners[0]["Port"] != 80:
+                      raise ValueError("O listener privado de OS deve usar TCP na porta 80.")
+                  balancers = json.loads(aws_output("elbv2", "describe-load-balancers", "--load-balancer-arns", listeners[0]["LoadBalancerArn"], "--output", "json"))["LoadBalancers"]
+                  if len(balancers) != 1:
+                      raise ValueError("O listener deve identificar um único NLB privado.")
+                  nlb = balancers[0]
+                  if nlb["Type"] != "network" or nlb["Scheme"] != "internal" or nlb["VpcId"] != vpc_id or nlb_sg not in nlb.get("SecurityGroups", []):
+                      raise ValueError("O NLB deve preservar a VPC e o security group publicados pelo Kubernetes.")
+                  import re
+                  dns = nlb["DNSName"]
+                  if not re.fullmatch(r"[a-zA-Z0-9.-]+\.elb\.[a-z0-9-]+\.amazonaws\.com", dns):
+                      raise ValueError("DNS do NLB privado inválido.")
+                  clientes_api_endereco_base = f"http://{dns}"
           if os.environ["TERRAFORM_ACTION"] == "destroy":
               connection_string = "Server=destroy-only;Database=destroy-only;User Id=destroy-only;Password=DestroyOnly-2026!;TrustServerCertificate=True"
               jwt_secret = "destroy-only-placeholder-secret-with-at-least-32-bytes"
               lambda_execution_role_name = os.environ.get("AUTH_LAMBDA_EXECUTION_ROLE_NAME", "DestroyOnlyRole")
+          elif clientes_api_habilitada:
+              connection_string = ""
+              jwt_secret = os.environ["AUTH_LAMBDA_JWT_SECRET"]
+              lambda_execution_role_name = os.environ["AUTH_LAMBDA_EXECUTION_ROLE_NAME"]
           else:
               endpoint = aws_output("ssm", "get-parameter", "--name", f"{os.environ['SSM_RDS_PREFIX']}/endpoint", "--query", "Parameter.Value", "--output", "text")
               secret_arn = aws_output("ssm", "get-parameter", "--name", f"{os.environ['SSM_RDS_PREFIX']}/master_secret_arn", "--query", "Parameter.Value", "--output", "text")
@@ -343,6 +390,9 @@ jobs:
               "lambda_package_file_path": "../../../../artifacts/auth-lambda/oficina-mecanica-auth-lambda.zip",
               "lambda_package_source_code_hash": os.environ["LAMBDA_PACKAGE_SOURCE_CODE_HASH"],
               "connection_string": connection_string,
+              "clientes_api_habilitada": clientes_api_habilitada,
+              "clientes_api_endereco_base": clientes_api_endereco_base,
+              "clientes_api_token": clientes_api_token,
               "jwt_secret": jwt_secret,
               "jwt_issuer": os.environ["AUTH_LAMBDA_JWT_ISSUER"],
               "jwt_audience": os.environ["AUTH_LAMBDA_JWT_AUDIENCE"],
@@ -450,6 +500,8 @@ jobs:
       TERRAFORM_ACTION: ${{ needs.resolve_action.outputs.terraform_action }}
       DD_API_KEY: ${{ secrets.DD_API_KEY }}
       AUTH_LAMBDA_JWT_SECRET: ${{ secrets.AUTH_LAMBDA_JWT_SECRET }}
+      CLIENTES_API_ENABLED: ${{ vars.CLIENTES_API_ENABLED || 'false' }}
+      CLIENTES_INTERNOS_TOKEN: ${{ secrets.CLIENTES_INTERNOS_TOKEN }}
       AUTH_LAMBDA_EXECUTION_ROLE_NAME: ${{ vars.AUTH_LAMBDA_EXECUTION_ROLE_NAME }}
       AUTH_LAMBDA_JWT_ISSUER: ${{ vars.AUTH_LAMBDA_JWT_ISSUER || 'oficina-mecanica-auth' }}
       AUTH_LAMBDA_JWT_AUDIENCE: ${{ vars.AUTH_LAMBDA_JWT_AUDIENCE || 'oficina-mecanica-api' }}
@@ -536,10 +588,53 @@ jobs:
               )
               return result.stdout.strip()
 
+          clientes_api_habilitada = False
+          clientes_api_endereco_base = ""
+          clientes_api_token = ""
+          if os.environ["TERRAFORM_ACTION"] != "destroy":
+              valor_habilitado = os.environ.get("CLIENTES_API_ENABLED", "false")
+              if valor_habilitado not in ("true", "false"):
+                  raise ValueError("CLIENTES_API_ENABLED deve ser true ou false.")
+              clientes_api_habilitada = valor_habilitado == "true"
+              if clientes_api_habilitada:
+                  clientes_api_token = os.environ.get("CLIENTES_INTERNOS_TOKEN", "")
+                  if not 32 <= len(clientes_api_token) <= 256 or any(not "!" <= c <= "~" for c in clientes_api_token):
+                      raise ValueError("Configure uma credencial técnica válida para a consulta privada de clientes.")
+                  if clientes_api_token == os.environ.get("AUTH_LAMBDA_JWT_SECRET"):
+                      raise ValueError("A credencial técnica deve ser segregada do JWT.")
+                  print(f"::add-mask::{clientes_api_token}")
+                  estado_api = aws_output("ssm", "get-parameter", "--name", os.environ["SSM_API_STATUS_PARAMETER"], "--query", "Parameter.Value", "--output", "text")
+                  if estado_api != "ready":
+                      raise ValueError("A API precisa estar ready antes de selecionar a consulta privada de clientes.")
+                  prefixo = os.environ["SSM_KUBERNETES_PREFIX"]
+                  listener_arn = aws_output("ssm", "get-parameter", "--name", f"{prefixo}/internal_nlb_listener_arn", "--query", "Parameter.Value", "--output", "text")
+                  nlb_sg = aws_output("ssm", "get-parameter", "--name", f"{prefixo}/internal_nlb_security_group_id", "--query", "Parameter.Value", "--output", "text")
+                  vpc_id = aws_output("ssm", "get-parameter", "--name", f"{os.environ['SSM_VPC_PREFIX']}/vpc_id", "--query", "Parameter.Value", "--output", "text")
+                  conta = aws_output("sts", "get-caller-identity", "--query", "Account", "--output", "text")
+                  if not listener_arn.startswith(f"arn:aws:elasticloadbalancing:{os.environ['AWS_REGION']}:{conta}:listener/net/"):
+                      raise ValueError("O listener privado deve pertencer à conta e região atuais.")
+                  listeners = json.loads(aws_output("elbv2", "describe-listeners", "--listener-arns", listener_arn, "--output", "json"))["Listeners"]
+                  if len(listeners) != 1 or listeners[0]["Protocol"] != "TCP" or listeners[0]["Port"] != 80:
+                      raise ValueError("O listener privado de OS deve usar TCP na porta 80.")
+                  balancers = json.loads(aws_output("elbv2", "describe-load-balancers", "--load-balancer-arns", listeners[0]["LoadBalancerArn"], "--output", "json"))["LoadBalancers"]
+                  if len(balancers) != 1:
+                      raise ValueError("O listener deve identificar um único NLB privado.")
+                  nlb = balancers[0]
+                  if nlb["Type"] != "network" or nlb["Scheme"] != "internal" or nlb["VpcId"] != vpc_id or nlb_sg not in nlb.get("SecurityGroups", []):
+                      raise ValueError("O NLB deve preservar a VPC e o security group publicados pelo Kubernetes.")
+                  import re
+                  dns = nlb["DNSName"]
+                  if not re.fullmatch(r"[a-zA-Z0-9.-]+\.elb\.[a-z0-9-]+\.amazonaws\.com", dns):
+                      raise ValueError("DNS do NLB privado inválido.")
+                  clientes_api_endereco_base = f"http://{dns}"
           if os.environ["TERRAFORM_ACTION"] == "destroy":
               connection_string = "Server=destroy-only;Database=destroy-only;User Id=destroy-only;Password=DestroyOnly-2026!;TrustServerCertificate=True"
               jwt_secret = "destroy-only-placeholder-secret-with-at-least-32-bytes"
               lambda_execution_role_name = os.environ.get("AUTH_LAMBDA_EXECUTION_ROLE_NAME", "DestroyOnlyRole")
+          elif clientes_api_habilitada:
+              connection_string = ""
+              jwt_secret = os.environ["AUTH_LAMBDA_JWT_SECRET"]
+              lambda_execution_role_name = os.environ["AUTH_LAMBDA_EXECUTION_ROLE_NAME"]
           else:
               endpoint = aws_output("ssm", "get-parameter", "--name", f"{os.environ['SSM_RDS_PREFIX']}/endpoint", "--query", "Parameter.Value", "--output", "text")
               secret_arn = aws_output("ssm", "get-parameter", "--name", f"{os.environ['SSM_RDS_PREFIX']}/master_secret_arn", "--query", "Parameter.Value", "--output", "text")
@@ -567,6 +662,9 @@ jobs:
               "lambda_package_file_path": "../../../../artifacts/auth-lambda/oficina-mecanica-auth-lambda.zip",
               "lambda_package_source_code_hash": os.environ["LAMBDA_PACKAGE_SOURCE_CODE_HASH"],
               "connection_string": connection_string,
+              "clientes_api_habilitada": clientes_api_habilitada,
+              "clientes_api_endereco_base": clientes_api_endereco_base,
+              "clientes_api_token": clientes_api_token,
               "jwt_secret": jwt_secret,
               "jwt_issuer": os.environ["AUTH_LAMBDA_JWT_ISSUER"],
               "jwt_audience": os.environ["AUTH_LAMBDA_JWT_AUDIENCE"],
@@ -665,6 +763,31 @@ jobs:
           test "$(aws ssm get-parameter --name "$SSM_AUTH_LAMBDA_PREFIX/function_name" --query 'Parameter.Value' --output text)" = "$function_name"
           test "$(aws ssm get-parameter --name "$SSM_AUTH_LAMBDA_PREFIX/security_group_id" --query 'Parameter.Value' --output text)" = "$security_group_id"
           test "$(aws ssm get-parameter --name "$SSM_AUTH_LAMBDA_STATUS_PARAMETER" --query 'Parameter.Value' --output text)" = "ready"
+
+          if [ "$CLIENTES_API_ENABLED" = "true" ]; then
+            FUNCTION_NAME="$function_name" python - <<'VALIDAR_CONSULTA_PRIVADA'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+
+          # Documento sintético válido: 200 ou 401 confirmam a consulta; 503 bloqueia.
+          evento = {"version": "2.0", "body": json.dumps({"documento": "52998224725"})}
+          with tempfile.TemporaryDirectory() as pasta:
+              resposta = Path(pasta) / "resposta.json"
+              resultado = subprocess.run([
+                  "aws", "lambda", "invoke", "--function-name", os.environ["FUNCTION_NAME"],
+                  "--cli-binary-format", "raw-in-base64-out", "--payload", json.dumps(evento),
+                  str(resposta), "--output", "json"
+              ], check=True, capture_output=True, text=True)
+              metadados = json.loads(resultado.stdout)
+              retorno = json.loads(resposta.read_text(encoding="utf-8"))
+              if metadados.get("FunctionError") or metadados.get("StatusCode") != 200 or retorno.get("statusCode") not in (200, 401):
+                  raise ValueError("A consulta privada Lambda → OS não foi confirmada; implantação bloqueada.")
+          print("Consulta privada Lambda → OS confirmada, sem registrar documento, token ou resposta.")
+          VALIDAR_CONSULTA_PRIVADA
+          fi
 
           echo "Auth Lambda $function_name validada com sucesso na AWS e no SSM."
 

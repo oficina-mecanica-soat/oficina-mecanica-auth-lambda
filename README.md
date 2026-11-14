@@ -207,7 +207,10 @@ Com a configuração default atual de 60 minutos, `expiresIn` será `3600`.
 
 | Variável | Obrigatória | Uso |
 | --- | --- | --- |
-| `ConnectionStrings__SqlServer` | Sim | Connection string do SQL Server usado para consulta de cliente. |
+| `ConnectionStrings__SqlServer` | Somente no modo legado | Connection string do SQL Server usado para consulta de cliente. |
+| `ClientesApi__Habilitado` | Não | `false` por padrão; `true` seleciona exclusivamente a consulta HTTP privada de OS. |
+| `ClientesApi__EnderecoBase` | No modo privado | Raiz do NLB interno, sem caminho, query ou fragmento. |
+| `ClientesApi__Token` | No modo privado | Credencial técnica exclusiva, ASCII imprimível de 32 a 256 caracteres, distinta do JWT. |
 | `Jwt__Issuer` | Sim | Issuer do JWT. Valor esperado: `oficina-mecanica-auth`. |
 | `Jwt__Audience` | Sim | Audience do JWT. Valor esperado: `oficina-mecanica-api`. |
 | `Jwt__Secret` | Sim | Chave HMAC-SHA256 usada para assinar o token. |
@@ -402,3 +405,11 @@ Planos Terraform e, na Lambda, o pacote planejado usam `github.run_id` e `github
 Uma nova tentativa precisa gerar e publicar seus próprios artefatos. Reexecutar somente jobs falhos, mantendo o planejamento bem-sucedido de uma tentativa anterior, não fornece artefatos para a nova tentativa e deve bloquear o download. Para repetir o ciclo, reexecute todos os jobs e gere um novo plano a partir do state recuperado; não renomeie nem copie artefatos antigos nem pule o planejamento. Não é autorizada uma reexecução AWS por este ajuste.
 
 Testes inline verificam nomes de produtor/consumidor, isolamento entre tentativas/execuções/contas/ambientes, ausência de fallback silencioso de artefatos e preservação da configuração de state em falha. São verificações locais/simuladas, não prova de um rerun real de apply no laboratório. Mantém bloqueios AWS, environments, plano salvo, ação versionada, recursos e contratos. Sem novas pastas/arquivos auxiliares. Integrar somente em `develop`, com merge por Gabriel; laboratório offline, sem implantação ou promoção para release/main.
+
+### Consulta privada de clientes
+
+Com `ClientesApi__Habilitado=true`, a Infrastructure implementa `IClienteAutenticacaoRepository` com um cliente HTTP tipado. A Application mantém o mesmo caso de uso e a Function mantém `POST /auth/documento`, claims e respostas públicas. Não há fallback para SQL após uma falha HTTP: indisponibilidade, timeout ou resposta incompatível resultam em `503`; cliente inexistente e inativo continuam indistinguíveis em `401`. O cliente usa timeout de cinco segundos, limite de resposta, sem redirecionamentos e com headers ocultados dos logs.
+
+A consulta usa `POST /internal/v1/clientes/consultar-autenticacao` com identidade técnica segregada. Essa rota fica fora do proxy público `/api/{proxy+}`. Para o corte coordenado, configurar o mesmo Environment Secret `CLIENTES_INTERNOS_TOKEN` na API e nesta Lambda e habilitar a Environment Variable `CLIENTES_API_ENABLED` primeiro na API. Após implantação e validação da API, habilitar a variável na Lambda. A esteira deriva o endereço do listener interno publicado pelo Kubernetes, confere conta, região, VPC, porta e security group e valida a chamada pela própria Lambda após o apply.
+
+No modo privado, o Terraform não injeta connection string na Lambda e substitui suas regras SQL por acesso TCP/80 restrito ao security group do NLB. Os blocos `moved` preservam o endereço do state das regras legadas na transição. O modo legado permanece disponível somente para a implantação atual, até o corte; não constitui fallback automático. `destroy` independe da nova credencial e dos contratos privados. A ativação segue sujeita ao bloqueio AWS, à janela autorizada e aos demais guardrails da esteira.

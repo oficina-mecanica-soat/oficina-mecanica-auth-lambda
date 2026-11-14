@@ -115,11 +115,45 @@ public sealed class FunctionStartupTests
         configuration.JwtOptions.ExpirationMinutes.Should().Be(60);
     }
 
+    [Fact]
+    public async Task Dado_ModoApiConfigurado_Quando_Inicializar_Entao_DeveDispensarConnectionStringSql()
+    {
+        // Arrange
+        using var environment = new EnvironmentScope(configuracaoValida: true, modoApi: true);
+        Environment.SetEnvironmentVariable("ConnectionStrings__SqlServer", null);
+
+        // Act
+        var configuracao = AuthLambdaConfiguration.Carregar();
+        var response = await new Function().Handler(new APIGatewayHttpApiV2ProxyRequest { Body = string.Empty });
+
+        // Assert
+        configuracao.ConnectionString.Should().BeEmpty();
+        configuracao.ClientesApiOptions.Habilitado.Should().BeTrue();
+        response.StatusCode.Should().Be(400);
+    }
+
+    [Fact]
+    public void Dado_FlagApiInvalida_Quando_Carregar_Entao_NaoDeveSelecionarSqlSilenciosamente()
+    {
+        // Arrange
+        using var environment = new EnvironmentScope(configuracaoValida: true);
+        Environment.SetEnvironmentVariable("ClientesApi__Habilitado", "nao-e-booleano");
+
+        // Act
+        var tentativa = () => AuthLambdaConfiguration.Carregar();
+
+        // Assert
+        tentativa.Should().Throw<InvalidOperationException>();
+    }
+
     private sealed class EnvironmentScope : IDisposable
     {
         private static readonly string[] Names =
         [
             "ConnectionStrings__SqlServer",
+            "ClientesApi__Habilitado",
+            "ClientesApi__EnderecoBase",
+            "ClientesApi__Token",
             "Jwt__Issuer",
             "Jwt__Audience",
             "Jwt__Secret",
@@ -128,12 +162,15 @@ public sealed class FunctionStartupTests
 
         private readonly Dictionary<string, string?> _previousValues;
 
-        public EnvironmentScope(bool configuracaoValida)
+        public EnvironmentScope(bool configuracaoValida, bool modoApi = false)
         {
             _previousValues = Names.ToDictionary(name => name, Environment.GetEnvironmentVariable);
 
             if (configuracaoValida)
             {
+                Environment.SetEnvironmentVariable("ClientesApi__Habilitado", modoApi.ToString());
+                Environment.SetEnvironmentVariable("ClientesApi__EnderecoBase", "https://api.interna.test");
+                Environment.SetEnvironmentVariable("ClientesApi__Token", "credencial-tecnica-exclusiva-teste-clientes-2026");
                 Environment.SetEnvironmentVariable("ConnectionStrings__SqlServer", "Server=(local);Database=Oficina;User Id=reader;Password=not-used;");
                 Environment.SetEnvironmentVariable("Jwt__Issuer", "oficina-mecanica-auth");
                 Environment.SetEnvironmentVariable("Jwt__Audience", "oficina-mecanica-api");

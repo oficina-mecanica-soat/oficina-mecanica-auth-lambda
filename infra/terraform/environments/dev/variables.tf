@@ -57,6 +57,33 @@ variable "connection_string" {
   sensitive   = true
 }
 
+variable "clientes_api_habilitada" {
+  description = "Seleciona a consulta privada de OS; desabilitada até a janela coordenada de corte."
+  type        = bool
+  default     = false
+}
+
+variable "clientes_api_endereco_base" {
+  description = "URL privada de OS resolvida pela esteira a partir do listener interno publicado pelo Kubernetes."
+  type        = string
+  default     = ""
+  validation {
+    condition     = !var.clientes_api_habilitada || can(regex("^https?://[^/?#@ ]+/?$", var.clientes_api_endereco_base))
+    error_message = "Informe a raiz da URL privada de OS para habilitar a consulta de clientes."
+  }
+}
+
+variable "clientes_api_token" {
+  description = "Credencial técnica exclusiva compartilhada com a consulta privada de OS."
+  type        = string
+  sensitive   = true
+  default     = ""
+  validation {
+    condition     = !var.clientes_api_habilitada || can(regex("^[!-~]{32,256}$", var.clientes_api_token))
+    error_message = "Configure uma credencial técnica ASCII de 32 a 256 caracteres para habilitar a consulta privada."
+  }
+}
+
 variable "jwt_issuer" {
   description = "Issuer esperado para os tokens JWT emitidos pela Auth Lambda."
   type        = string
@@ -109,6 +136,12 @@ variable "auth_lambda_ssm_prefix" {
   description = "Prefixo SSM usado para publicar outputs da Auth Lambda."
   type        = string
   default     = "/oficina-mecanica/development/auth-lambda"
+}
+
+variable "kubernetes_ssm_prefix" {
+  description = "Prefixo SSM do NLB privado publicado pela esteira de Kubernetes."
+  type        = string
+  default     = "/oficina-mecanica/development/kubernetes"
 }
 
 variable "auth_lambda_status_parameter_name" {
