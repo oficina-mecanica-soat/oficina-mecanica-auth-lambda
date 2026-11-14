@@ -554,6 +554,67 @@ jobs:
       - name: "🧪 Validar recuperação segura de destroy"
         run: node --test .github/scripts/*.test.cjs
 
+      - name: "🧪 Validar ativação da consulta privada de clientes"
+        run: |
+          python - <<'TESTAR_CLIENTES'
+          import contextlib
+          import io
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import tempfile
+          from unittest.mock import patch
+
+          texto = Path('.github/workflows/aws-deploy.yml').read_text(encoding='utf-8')
+          blocos = [s for s in re.findall(r"          python - <<'PY'\n(.*?)\n          PY", texto, re.S) if 'clientes_' in s and 'zz_ci.auto.tfvars.json' in s]
+          assert blocos, 'Geração de variáveis privadas ausente.'
+          for bloco in blocos:
+              codigo = '\n'.join(linha[10:] for linha in bloco.splitlines())
+              auth = 'clientes_api_habilitada' in codigo
+              casos = [('destroy', 'true', '', False), ('apply', 'false', '', False), ('apply', 'true', 'token-ficticio-exclusivo-de-testes-2026', False), ('apply', 'TRUE', '', True), ('apply', 'true', '', True), ('apply', 'true', 'jwt-ficticio-exclusivo-de-testes-2026', True)]
+              if auth:
+                  casos += [('apply', 'true', 'token-ficticio-exclusivo-de-testes-2026', 'publico'), ('apply', 'true', 'token-ficticio-exclusivo-de-testes-2026', 'outra-vpc')]
+              for acao, flag, token, falha in casos:
+                  chamadas = []
+                  def consultar(args, **kwargs):
+                      chamadas.append(args)
+                      if args[1:3] == ['ssm', 'get-parameter']:
+                          nome = args[args.index('--name') + 1]
+                          valor = {'endpoint': 'sql.test.local', 'master_secret_arn': 'arn-teste', 'internal_nlb_listener_arn': 'arn:aws:elasticloadbalancing:us-east-1:123456789012:listener/net/teste/abc/def', 'internal_nlb_security_group_id': 'sg-teste', 'vpc_id': 'vpc-teste'}.get(nome.rsplit('/', 1)[-1], 'ready')
+                      elif args[1:3] == ['sts', 'get-caller-identity']:
+                          valor = '123456789012'
+                      elif args[1:3] == ['elbv2', 'describe-listeners']:
+                          valor = json.dumps({'Listeners': [{'Protocol': 'TCP', 'Port': 80, 'LoadBalancerArn': 'arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/net/teste/abc'}]})
+                      elif args[1:3] == ['elbv2', 'describe-load-balancers']:
+                          valor = json.dumps({'LoadBalancers': [{'Type': 'network', 'Scheme': 'internet-facing' if falha == 'publico' else 'internal', 'VpcId': 'vpc-outra' if falha == 'outra-vpc' else 'vpc-teste', 'SecurityGroups': ['sg-teste'], 'DNSName': 'internal-teste.elb.us-east-1.amazonaws.com'}]})
+                      elif args[1:3] == ['secretsmanager', 'get-secret-value']:
+                          valor = json.dumps({'username': 'usuario-teste', 'password': 'senha-ficticia'})
+                      else:
+                          raise AssertionError('Comando inesperado no teste: ' + repr(args))
+                      return subprocess.CompletedProcess(args, 0, stdout=valor)
+                  with tempfile.TemporaryDirectory() as pasta:
+                      ambiente = {'TERRAFORM_ACTION': acao, 'CLIENTES_API_ENABLED': flag, 'CLIENTES_INTERNOS_TOKEN': token, 'JWT_SECRET': 'jwt-ficticio-exclusivo-de-testes-2026', 'WEBHOOK_TOKEN': 'webhook-ficticio', 'AUTH_LAMBDA_JWT_SECRET': 'jwt-ficticio-exclusivo-de-testes-2026', 'AUTH_LAMBDA_JWT_ISSUER': 'issuer-teste', 'AUTH_LAMBDA_JWT_AUDIENCE': 'audience-teste', 'AUTH_LAMBDA_JWT_EXPIRATION_MINUTES': '60', 'AUTH_LAMBDA_EXECUTION_ROLE_NAME': 'LabRole', 'ECR_IMAGE_URI': 'teste.local/imagem:teste', 'AWS_REGION': 'us-east-1', 'SSM_ENVIRONMENT_NAME': 'development', 'SSM_RDS_PREFIX': '/teste/rds', 'SSM_VPC_PREFIX': '/teste/vpc', 'SSM_KUBERNETES_PREFIX': '/teste/kubernetes', 'SSM_API_STATUS_PARAMETER': '/teste/status/api', 'TF_WORKING_DIRECTORY': pasta, 'DD_VERSION': 'teste', 'LAMBDA_PACKAGE_SOURCE_CODE_HASH': 'hash-teste'}
+                      try:
+                          with patch.dict(os.environ, ambiente, clear=True), patch('subprocess.run', side_effect=consultar), contextlib.redirect_stdout(io.StringIO()):
+                              exec(compile(codigo, 'tfvars-do-workflow', 'exec'), {})
+                      except ValueError:
+                          assert falha, 'Cenário válido rejeitado.'
+                      else:
+                          assert not falha, 'Cenário inseguro foi aceito.'
+                          values = json.loads((Path(pasta) / 'zz_ci.auto.tfvars.json').read_text(encoding='utf-8'))
+                          habilitado = flag == 'true' and acao != 'destroy'
+                          assert values['clientes_api_habilitada' if auth else 'clientes_internos_habilitado'] == habilitado
+                          if acao == 'destroy':
+                              assert not chamadas, 'Destroy não pode depender de novos contratos ou secrets.'
+                          if auth and habilitado:
+                              assert values['connection_string'] == ''
+                              assert values['clientes_api_endereco_base'] == 'http://internal-teste.elb.us-east-1.amazonaws.com'
+                              assert not any(a[1] == 'secretsmanager' for a in chamadas), 'Modo privado não pode ler a credencial SQL.'
+          print('Contratos privados: ativação, isolamento de credenciais, dependências e destroy validados sem AWS.')
+          TESTAR_CLIENTES
+
       - name: "🎨 03 · Verificar formatação Terraform"
         run: terraform fmt -check -recursive infra/terraform
 
@@ -562,6 +623,9 @@ jobs:
 
       - name: "🔍 05 · Validar configuração Terraform"
         run: terraform -chdir="$TF_WORKING_DIRECTORY" validate
+
+      - name: "🧪 06 · Validar isolamento Terraform de clientes"
+        run: terraform -chdir="$TF_WORKING_DIRECTORY" test
 
   package_lambda:
     name: "📦 06 · Empacotar Lambda"
