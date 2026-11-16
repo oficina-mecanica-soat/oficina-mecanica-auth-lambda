@@ -249,7 +249,9 @@ O ambiente VocLabs fornece a `LabRole`; este repositório apenas consulta e asso
 
 O merge em `develop` chama o workflow AWS quando há mudança deployável. `infra/terraform/environments/dev/terraform-action.env` controla `apply` ou `destroy`; destroy deve ocorrer em PR dedicado. Após `apply`, a esteira valida configuração, VPC, layers, secret Datadog e contratos SSM. Após `destroy`, confirma a remoção da função e dos contratos próprios.
 
-A Lambda consome os parâmetros da VPC e do RDS e publica `/oficina-mecanica/development/auth-lambda/function_arn`, `function_name` e `/oficina-mecanica/development/status/auth-lambda`.
+A Lambda publica `/oficina-mecanica/development/auth-lambda/function_arn`, `function_name` e `/oficina-mecanica/development/status/auth-lambda`. No fluxo distribuído, `CLIENTES_API_ENABLED=true` consulta clientes pela API privada e remove a conexão SQL da função; a credencial técnica é distinta do JWT. O modo SQL é legado.
+
+Seu apply vem depois da API com consulta privada disponível e antes do Gateway. O JWT precisa ser aceito pelos três serviços. Seguir a [ordem canônica das oito esteiras](https://github.com/oficina-mecanica-soat/oficina-mecanica-api#deploy-aws); não aplicar Terraform localmente.
 
 ---
 
@@ -366,7 +368,7 @@ Os workflows de CI/CD validam código, testes, Terraform e o fluxo de branches a
 - Não versionar secrets, connection strings reais, tokens, senhas ou credenciais AWS.
 - A API principal continua dona do schema, das migrations, dos seeds e das regras gerais de domínio.
 - A Auth Lambda não referencia o projeto da API principal.
-- Documentação central e arquitetura completa: [README da Oficina Mecânica API](https://github.com/geoscabio/oficina-mecanica-api).
+- Documentação central e arquitetura completa: [README da Oficina Mecânica API](https://github.com/oficina-mecanica-soat/oficina-mecanica-api).
 
 ### Reconciliação de destroy após reset do laboratório
 
