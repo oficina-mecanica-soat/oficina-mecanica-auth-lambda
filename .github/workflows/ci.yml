@@ -756,6 +756,7 @@ jobs:
           const assert = require('node:assert/strict');
           const Module = require('node:module');
           const origem = fs.readFileSync('.github/workflows/aws-deploy.yml', 'utf8').replace(/\r/g, '');
+          assert.match(origem, /^  SSM_ENVIRONMENT_NAME: development$/m, 'O workflow deve fornecer o ambiente real da proteção.');
           const bloco = origem.match(
             /          cat > "\$RUNNER_TEMP\/proteger-estados.cjs" <<'PROTEGER_ESTADOS'\n([\s\S]*?)          PROTEGER_ESTADOS/
           );
@@ -774,7 +775,7 @@ jobs:
             AWS_REGION: 'us-east-1',
             GITHUB_REPOSITORY: repo,
             AWS_ACCOUNT_ID: '123456789012',
-            SSM_ENVIRONMENT_NAME: 'development',
+            SSM_ENVIRONMENT_NAME: origem.match(/^  SSM_ENVIRONMENT_NAME: (.+)$/m)?.[1],
             GITHUB_RUN_ID: '123',
             GITHUB_RUN_ATTEMPT: '1',
             GITHUB_SHA: 'a'.repeat(40),
