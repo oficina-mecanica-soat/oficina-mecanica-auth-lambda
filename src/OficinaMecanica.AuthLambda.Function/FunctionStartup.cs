@@ -33,7 +33,8 @@ internal static class FunctionStartup
         services.AddAuthLambdaApplication();
         services.AddAuthLambdaInfrastructure(
             configuration.ConnectionString,
-            configuration.JwtOptions);
+            configuration.JwtOptions,
+            configuration.ClientesApiOptions);
 
         var serviceProvider = services.BuildServiceProvider();
 

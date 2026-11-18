@@ -15,21 +15,27 @@ resource "aws_lambda_function" "auth" {
   tags = local.common_tags
 
   environment {
-    variables = {
+    variables = merge({
+      "Jwt__Issuer"             = var.jwt_issuer
+      "Jwt__Audience"           = var.jwt_audience
+      "Jwt__Secret"             = var.jwt_secret
+      "Jwt__ExpirationMinutes"  = tostring(var.jwt_expiration_minutes)
+      "AWS_LAMBDA_EXEC_WRAPPER" = "/opt/datadog_wrapper"
+      "DD_API_KEY_SECRET_ARN"   = aws_secretsmanager_secret.datadog_api_key.arn
+      "DD_ENV"                  = var.environment
+      "DD_LOGS_INJECTION"       = "true"
+      "DD_SERVICE"              = "oficina-mecanica-auth-lambda"
+      "DD_SITE"                 = "datadoghq.com"
+      "DD_TRACE_ENABLED"        = "true"
+      "DD_VERSION"              = var.datadog_version
+      }, var.clientes_api_habilitada ? {
+      "ClientesApi__Habilitado"   = "true"
+      "ClientesApi__EnderecoBase" = var.clientes_api_endereco_base
+      "ClientesApi__Token"        = var.clientes_api_token
+      } : {
+      "ClientesApi__Habilitado"      = "false"
       "ConnectionStrings__SqlServer" = var.connection_string
-      "Jwt__Issuer"                  = var.jwt_issuer
-      "Jwt__Audience"                = var.jwt_audience
-      "Jwt__Secret"                  = var.jwt_secret
-      "Jwt__ExpirationMinutes"       = tostring(var.jwt_expiration_minutes)
-      "AWS_LAMBDA_EXEC_WRAPPER"      = "/opt/datadog_wrapper"
-      "DD_API_KEY_SECRET_ARN"        = aws_secretsmanager_secret.datadog_api_key.arn
-      "DD_ENV"                       = var.environment
-      "DD_LOGS_INJECTION"            = "true"
-      "DD_SERVICE"                   = "oficina-mecanica-auth-lambda"
-      "DD_SITE"                      = "datadoghq.com"
-      "DD_TRACE_ENABLED"             = "true"
-      "DD_VERSION"                   = var.datadog_version
-    }
+    })
   }
 
   vpc_config {
@@ -40,6 +46,8 @@ resource "aws_lambda_function" "auth" {
   depends_on = [
     aws_cloudwatch_log_group.lambda,
     aws_vpc_security_group_egress_rule.lambda_sql_server_to_rds,
+    aws_vpc_security_group_egress_rule.lambda_clientes_para_nlb,
+    aws_vpc_security_group_ingress_rule.nlb_clientes_da_lambda,
     terraform_data.vpc_ready,
     terraform_data.rds_ready,
   ]

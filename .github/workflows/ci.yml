@@ -333,8 +333,520 @@ jobs:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
+      - name: "🧪 Validar bloqueio de AWS sem laboratório"
+        run: |
+          node <<'TESTAR_BLOQUEIO_AWS'
+          const fs = require('node:fs');
+          const cp = require('node:child_process');
+          const assert = require('node:assert/strict');
+          const ler = nome => fs.readFileSync('.github/workflows/' + nome, 'utf8').replace(/\r\n/g, '\n');
+          const deploy = ler('aws-deploy.yml');
+          const cd = ler('cd-development.yml');
+          const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash';
+          const gate = texto => {
+            const bloco = texto.match(/      - name: "🛡️ Conferir habilitação do deploy AWS"\n([\s\S]*?)(?=      - name:|$)/);
+            assert(bloco, 'Barreira de AWS ausente.');
+            assert(bloco[1].includes('DEPLOY_ENABLED: \u0024{{ vars.AWS_DEPLOY_ENABLED }}'));
+            const script = bloco[1].split('        run: |\n')[1];
+            assert(script, 'Validação executável ausente.');
+            return script.split('\n').map(l => l.slice(10)).join('\n').trim();
+          };
+          function conferirBloqueio(texto) {
+            const script = gate(texto);
+            function executar(flag, ref = 'refs/heads/develop', ambiente = 'development') {
+              const env = { ...process.env, GITHUB_REF: ref, DEPLOY_ENVIRONMENT: ambiente };
+              delete env.DEPLOY_ENABLED;
+              if (flag !== undefined) env.DEPLOY_ENABLED = flag;
+              const resultado = cp.spawnSync(bash, ['-e', '-c', script], { env, encoding: 'utf8' });
+              assert.ifError(resultado.error);
+              return resultado.status;
+            }
+            for (const valor of [undefined, '', 'false', 'TRUE', 'true ']) {
+              assert.notEqual(executar(valor), 0, 'Valor deve bloquear: ' + valor);
+            }
+            assert.equal(executar('true'), 0);
+            for (const ref of ['refs/heads/main', 'refs/heads/release', 'refs/heads/feature/teste', 'refs/tags/develop']) {
+              assert.notEqual(executar('true', ref), 0, 'Ref indevida deve bloquear.');
+            }
+            assert.notEqual(executar('true', 'refs/heads/develop', 'production'), 0);
+            assert.notEqual(executar('true', 'refs/heads/develop', ''), 0);
+          }
+          conferirBloqueio(deploy);
+          assert(deploy.includes('DEPLOY_ENVIRONMENT: \u0024{{ inputs.environment_name }}'), 'Barreira deve conferir o Environment solicitado.');
+          assert(deploy.indexOf('🛡️ Conferir habilitação do deploy AWS') < deploy.indexOf('id: resolve'), 'Resolver ação somente após a barreira.');
+          for (const nome of ['prepare_and_plan', 'apply_or_destroy']) {
+            const job = deploy.split('\n  ' + nome + ':')[1]?.split(/\n  [a-z_]+:/)[0];
+            assert(job && /needs:[\s\S]*?resolve_action/.test(job), 'Job AWS deve depender da barreira.');
+          }
+          if (fs.existsSync('.github/workflows/datadog-observability.yml')) {
+            const datadog = ler('datadog-observability.yml');
+            conferirBloqueio(datadog);
+            const job = datadog.split('\n  deploy-datadog:')[1];
+            assert(job.includes("if: vars.AWS_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/develop'"));
+            assert(datadog.indexOf('🛡️ Conferir habilitação do deploy AWS') < datadog.indexOf('aws-actions/configure-aws-credentials'), 'Datadog deve bloquear antes das credenciais.');
+            assert(cd.includes("vars.AWS_DEPLOY_ENABLED == 'true'"), 'Caller do Datadog deve preservar a barreira.');
+          } else {
+            const job = cd.split('\n  deploy-development:')[1].split('\n  open-pr-to-release:')[0];
+            assert(job.includes("if: needs.detect-deploy-scope.outputs.deploy_required == 'true' && vars.AWS_DEPLOY_ENABLED == 'true'"), 'Caller deve exigir flag e mudança implantável.');
+          }
+          console.log('Barreira AWS: ausência/false bloqueiam; true exige develop/development; caller e callee protegidos, sem consulta AWS.');
+          TESTAR_BLOQUEIO_AWS
+
+      - name: "🧪 Validar promoção cumulativa sem AWS"
+        run: |
+          node <<'TESTAR_PROMOCAO_CUMULATIVA'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const os = require('node:os');
+          const cp = require('node:child_process');
+          const assert = require('node:assert/strict');
+          const workflow = fs.readFileSync('.github/workflows/cd-development.yml', 'utf8');
+          const bloco = workflow.match(/node <<'VALIDAR_PROMOCAO_CUMULATIVA'\r?\n([\s\S]*?)          VALIDAR_PROMOCAO_CUMULATIVA/);
+          assert(bloco, 'Guarda cumulativa ausente.');
+          const codigo = bloco[1].split(/\r?\n/).map(l => l.slice(10)).join('\n');
+          const validar = new Function(codigo.split('// Execução no runner:')[0] + '; return validarPromocao;')();
+          const detector = workflow.match(/node <<'DETECTAR_DEPLOY'\r?\n([\s\S]*?)          DETECTAR_DEPLOY/)[1].split(/\r?\n/).map(l => l.slice(10)).join('\n');
+          const caminhos = JSON.parse(workflow.match(/DEPLOYABLE_PATHS: >-\r?\n((?:    [^\n]*\r?\n)+)/)[1]);
+          const diretorio = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'promocao-cumulativa-'));
+          try {
+            const git = args => cp.execFileSync('git', args, { cwd: diretorio, encoding: 'utf8' }).trim();
+            git(['init', '-b', 'develop']);
+            git(['config', 'user.email', 'teste@example.invalid']);
+            git(['config', 'user.name', 'Teste local']);
+            const gravar = (nome, conteudo) => {
+              fs.mkdirSync(path.dirname(path.join(diretorio, nome)), { recursive: true });
+              fs.writeFileSync(path.join(diretorio, nome), conteudo);
+              git(['add', nome]);
+              git(['commit', '-m', 'cenário local']);
+              return git(['rev-parse', 'HEAD']);
+            };
+            const base = gravar('README.md', 'base');
+            const docs = gravar('README.md', 'documentação');
+            const consultarNunca = () => { throw new Error('Consulta inesperada.'); };
+            const opcoes = { git, caminhos, base, head: docs, consultar: consultarNunca };
+            assert.equal(validar(opcoes), 'SEM_ALTERACAO_IMPLANTAVEL');
+
+            git(['switch', '-c', 'feature/teste']);
+            gravar('infra/terraform/exemplo.tf', 'código');
+            git(['switch', 'develop']);
+            git(['merge', '--no-ff', 'feature/teste', '-m', 'merge funcional']);
+            const implantavel = git(['rev-parse', 'HEAD']);
+            const head = gravar('README.md', 'documentação depois do código');
+            const detectar = (antes, atual) => {
+              const saida = path.join(diretorio, 'saida-runner.txt');
+              fs.writeFileSync(saida, '');
+              cp.execFileSync(process.execPath, ['-e', detector], {
+                cwd: diretorio,
+                env: { ...process.env, DEPLOYABLE_PATHS: JSON.stringify(caminhos), GITHUB_BEFORE: antes, GITHUB_SHA: atual, GITHUB_OUTPUT: saida }
+              });
+              return fs.readFileSync(saida, 'utf8').trim();
+            };
+            assert.equal(detectar(base, implantavel), 'deploy_required=true');
+            assert.equal(detectar(implantavel, head), 'deploy_required=false');
+            let chamadas = [];
+            const run = { id: 123, run_attempt: 2, head_sha: implantavel, head_branch: 'develop', event: 'push', status: 'completed', conclusion: 'success' };
+            const job = { name: '☁️ 02 · Deploy em development / ☁️ 03 · Aplicar ou destruir Auth Lambda', conclusion: 'success' };
+            const consultar = endpoint => {
+              chamadas.push(endpoint);
+              return endpoint.startsWith('actions/workflows/') ? [{ workflow_runs: [run] }] : [{ jobs: [job] }];
+            };
+            const comCodigo = { ...opcoes, head, consultar };
+            assert.throws(() => validar({ ...comCodigo, consultar: () => [{ workflow_runs: [] }] }), /sem CD/);
+            assert.equal(validar(comCodigo), 'OPERACAO_ANTERIOR_CONFIRMADA');
+            assert(chamadas[0].includes('head_sha=' + implantavel), 'Deve buscar o merge em develop, não o commit da feature/documentação.');
+            assert(chamadas[1].includes('/attempts/2/jobs'), 'Deve consultar a tentativa atual.');
+            for (const estado of ['skipped', 'failure', 'cancelled']) {
+              job.conclusion = estado;
+              assert.throws(() => validar(comCodigo), /sem aplicação/);
+            }
+            job.conclusion = 'success';
+            assert.throws(() => validar({ ...comCodigo, consultar: endpoint => endpoint.startsWith('actions/workflows/') ? [{ workflow_runs: [run] }] : [{}] }), /Jobs/);
+            assert.throws(() => validar({ ...comCodigo, consultar: endpoint => [{ workflow_runs: [{ ...run, head_sha: '0'.repeat(40) }] }] }), /sem CD/);
+            assert.throws(() => validar({ ...comCodigo, consultar: endpoint => [{ workflow_runs: [run, { ...run, id: 124, conclusion: 'failure' }] }] }), /sem CD/);
+            run.conclusion = 'failure';
+            assert.throws(() => validar(comCodigo), /sem CD/);
+            run.conclusion = 'success';
+            run.status = 'in_progress';
+            assert.throws(() => validar(comCodigo), /sem CD/);
+            run.status = 'completed';
+            assert.throws(() => validar({ ...comCodigo, consultar: consultarNunca }), /Consulta inesperada/);
+            assert.throws(() => validar({ ...comCodigo, consultar: () => ({}) }), /Histórico/);
+            assert.equal(validar({ ...comCodigo, consultar: consultarNunca, resultadoAtual: 'success', acaoAtual: 'apply' }), 'OPERACAO_ATUAL_CONFIRMADA');
+            assert.equal(validar({ ...comCodigo, consultar: consultarNunca, resultadoAtual: 'success', acaoAtual: 'destroy' }), 'OPERACAO_ATUAL_CONFIRMADA');
+            assert.throws(() => validar({ ...comCodigo, consultar: consultarNunca, resultadoAtual: 'skipped', acaoAtual: 'apply' }), /Consulta inesperada/);
+            gravar('infra/terraform/exemplo.tf', 'outro código ainda sem deploy');
+            const posterior = gravar('README.md', 'mais documentação');
+            assert.throws(() => validar({ ...comCodigo, head: posterior }), /sem CD/);
+            gravar('infra/terraform/exemplo.tf', 'código');
+            assert.equal(validar({ ...comCodigo, base: implantavel, head: git(['rev-parse', 'HEAD']), consultar: consultarNunca }), 'SEM_ALTERACAO_IMPLANTAVEL');
+            console.log('Promoção cumulativa: código sem deploy bloqueado; código implantado seguido de docs permitido; falhas, skips, reruns e novo código protegidos.');
+          } finally {
+            assert.equal(path.dirname(fs.realpathSync(diretorio)), fs.realpathSync(process.env.RUNNER_TEMP || os.tmpdir()));
+            fs.rmSync(diretorio, { recursive: true, force: true });
+          }
+          TESTAR_PROMOCAO_CUMULATIVA
+
+      - name: "🧪 Validar artefatos e cache por tentativa"
+        run: |
+          node <<'TESTAR_ARTEFATOS_TENTATIVA'
+          const fs = require('node:fs');
+          const assert = require('node:assert/strict');
+          const workflow = fs.readFileSync('.github/workflows/aws-deploy.yml', 'utf8').replace(/\r\n/g, '\n');
+          const etapas = workflow.split(/(?=      - name:)/);
+          const upload = etapas.filter(s => /uses: actions\/upload-artifact@/.test(s));
+          const download = etapas.filter(s => /uses: actions\/download-artifact@/.test(s));
+          const restores = etapas.filter(s => /uses: actions\/cache\/restore@/.test(s));
+          const saves = etapas.filter(s => /uses: actions\/cache\/save@/.test(s));
+          assert(upload.length > 0 && upload.length === download.length);
+          assert.equal(restores.length, 2);
+          assert.equal(saves.length, 1);
+          const valor = (etapa, campo) => {
+            const encontrado = etapa.match(new RegExp('^          ' + campo + ': (.+)$', 'm'));
+            assert(encontrado, 'Campo obrigatório: ' + campo);
+            return encontrado[1];
+          };
+          // Escapar o dólar impede interpolação prematura pelo próprio GitHub Actions no teste.
+          const expressao = nome => '\u0024{{ ' + nome + ' }}';
+          const expandir = (modelo, tentativa = 1, execucao = 100, conta = '111111111111', ambiente = 'development') => modelo
+            .replaceAll(expressao('github.run_id'), String(execucao))
+            .replaceAll(expressao('github.run_attempt'), String(tentativa))
+            .replaceAll(expressao('steps.aws_credentials.outputs.aws-account-id'), conta)
+            .replaceAll(expressao('inputs.environment_name'), ambiente);
+          for (const produtor of upload) {
+            const nome = valor(produtor, 'name');
+            assert(nome.includes(expressao('github.run_id')) && nome.includes(expressao('github.run_attempt')));
+            const consumidores = download.filter(s => valor(s, 'name') === nome);
+            assert.equal(consumidores.length, 1, 'Download deve usar exatamente o nome publicado.');
+            assert(produtor.includes('if-no-files-found: error'));
+            assert(!consumidores[0].includes('pattern:') && !consumidores[0].includes('continue-on-error:'), 'Sem fallback silencioso de artefato.');
+            const tentativa1 = expandir(nome);
+            const tentativa2 = expandir(nome, 2);
+            assert.notEqual(tentativa1, tentativa2, 'Rerun não pode colidir com artefato imutável anterior.');
+            assert.notEqual(tentativa2, expandir(nome, 2, 101), 'Execuções diferentes devem permanecer isoladas.');
+            const publicados = new Map([[tentativa1, 'conteúdo da primeira tentativa']]);
+            assert(!publicados.has(tentativa2), 'Sem nova publicação, a segunda tentativa não pode baixar a primeira.');
+            publicados.set(tentativa2, 'conteúdo da segunda tentativa');
+            assert.equal(publicados.get(expandir(valor(consumidores[0], 'name'), 2)), 'conteúdo da segunda tentativa');
+          }
+          const chaveFinal = valor(saves[0], 'key');
+          assert(saves[0].includes('if: always()'), 'Falha do apply não pode pular a preservação do state.');
+          for (const etapa of [...restores, ...saves]) {
+            const chave = valor(etapa, 'key');
+            for (const campo of ['github.run_id', 'github.run_attempt', 'steps.aws_credentials.outputs.aws-account-id', 'inputs.environment_name']) {
+              assert(chave.includes(expressao(campo)), 'Cache deve preservar conta, ambiente, execução e tentativa.');
+            }
+            assert.equal(chave, chaveFinal, 'Restaurar/salvar o mesmo escopo de state.');
+            assert(etapa.includes('/terraform.tfstate') && etapa.includes('/terraform.tfstate.backup'));
+          }
+          for (const etapa of restores) {
+            const prefixo = etapa.match(/          restore-keys: \|\n            ([^\n]+)/)?.[1];
+            assert(prefixo && prefixo.includes(expressao('steps.aws_credentials.outputs.aws-account-id')) && prefixo.includes(expressao('inputs.environment_name')));
+            assert.equal(expandir(chaveFinal).startsWith(expandir(prefixo)), true);
+            assert.notEqual(expandir(prefixo), expandir(prefixo, 1, 100, '222222222222'));
+            assert.notEqual(expandir(prefixo), expandir(prefixo, 1, 100, '111111111111', 'production'));
+          }
+          const antes = expandir(chaveFinal);
+          const depois = expandir(chaveFinal, 2);
+          assert.notEqual(antes, depois, 'State de falha parcial precisa de chave gravável na nova tentativa.');
+          console.log('Artefatos/cache por execução e tentativa: nomes simétricos, sem reaproveitar plano/pacote anterior, conta/ambiente isolados e state sempre preservado na configuração.');
+          TESTAR_ARTEFATOS_TENTATIVA
+
       - name: "🧪 Validar recuperação segura de destroy"
         run: node --test .github/scripts/*.test.cjs
+
+      - name: "🧪 Validar ativação da consulta privada de clientes"
+        run: |
+          python - <<'TESTAR_CLIENTES'
+          import contextlib
+          import io
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import tempfile
+          from unittest.mock import patch
+
+          texto = Path('.github/workflows/aws-deploy.yml').read_text(encoding='utf-8')
+          blocos = [s for s in re.findall(r"          python - <<'PY'\n(.*?)\n          PY", texto, re.S) if 'clientes_' in s and 'zz_ci.auto.tfvars.json' in s]
+          assert blocos, 'Geração de variáveis privadas ausente.'
+          for bloco in blocos:
+              codigo = '\n'.join(linha[10:] for linha in bloco.splitlines())
+              auth = 'clientes_api_habilitada' in codigo
+              casos = [('destroy', 'true', '', False), ('apply', 'false', '', False), ('apply', 'true', 'token-ficticio-exclusivo-de-testes-2026', False), ('apply', 'TRUE', '', True), ('apply', 'true', '', True), ('apply', 'true', 'jwt-ficticio-exclusivo-de-testes-2026', True)]
+              if auth:
+                  casos += [('apply', 'true', 'token-ficticio-exclusivo-de-testes-2026', 'publico'), ('apply', 'true', 'token-ficticio-exclusivo-de-testes-2026', 'outra-vpc')]
+              for acao, flag, token, falha in casos:
+                  chamadas = []
+                  def consultar(args, **kwargs):
+                      chamadas.append(args)
+                      if args[1:3] == ['ssm', 'get-parameter']:
+                          nome = args[args.index('--name') + 1]
+                          valor = {'endpoint': 'sql.test.local', 'master_secret_arn': 'arn-teste', 'internal_nlb_listener_arn': 'arn:aws:elasticloadbalancing:us-east-1:123456789012:listener/net/teste/abc/def', 'internal_nlb_security_group_id': 'sg-teste', 'vpc_id': 'vpc-teste'}.get(nome.rsplit('/', 1)[-1], 'ready')
+                      elif args[1:3] == ['sts', 'get-caller-identity']:
+                          valor = '123456789012'
+                      elif args[1:3] == ['elbv2', 'describe-listeners']:
+                          valor = json.dumps({'Listeners': [{'Protocol': 'TCP', 'Port': 80, 'LoadBalancerArn': 'arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/net/teste/abc'}]})
+                      elif args[1:3] == ['elbv2', 'describe-load-balancers']:
+                          valor = json.dumps({'LoadBalancers': [{'Type': 'network', 'Scheme': 'internet-facing' if falha == 'publico' else 'internal', 'VpcId': 'vpc-outra' if falha == 'outra-vpc' else 'vpc-teste', 'SecurityGroups': ['sg-teste'], 'DNSName': 'internal-teste.elb.us-east-1.amazonaws.com'}]})
+                      elif args[1:3] == ['secretsmanager', 'get-secret-value']:
+                          valor = json.dumps({'username': 'usuario-teste', 'password': 'senha-ficticia'})
+                      else:
+                          raise AssertionError('Comando inesperado no teste: ' + repr(args))
+                      return subprocess.CompletedProcess(args, 0, stdout=valor)
+                  with tempfile.TemporaryDirectory() as pasta:
+                      ambiente = {'TERRAFORM_ACTION': acao, 'CLIENTES_API_ENABLED': flag, 'CLIENTES_INTERNOS_TOKEN': token, 'JWT_SECRET': 'jwt-ficticio-exclusivo-de-testes-2026', 'WEBHOOK_TOKEN': 'webhook-ficticio', 'AUTH_LAMBDA_JWT_SECRET': 'jwt-ficticio-exclusivo-de-testes-2026', 'AUTH_LAMBDA_JWT_ISSUER': 'issuer-teste', 'AUTH_LAMBDA_JWT_AUDIENCE': 'audience-teste', 'AUTH_LAMBDA_JWT_EXPIRATION_MINUTES': '60', 'AUTH_LAMBDA_EXECUTION_ROLE_NAME': 'LabRole', 'ECR_IMAGE_URI': 'teste.local/imagem:teste', 'AWS_REGION': 'us-east-1', 'SSM_ENVIRONMENT_NAME': 'development', 'SSM_RDS_PREFIX': '/teste/rds', 'SSM_VPC_PREFIX': '/teste/vpc', 'SSM_KUBERNETES_PREFIX': '/teste/kubernetes', 'SSM_API_STATUS_PARAMETER': '/teste/status/api', 'TF_WORKING_DIRECTORY': pasta, 'DD_VERSION': 'teste', 'LAMBDA_PACKAGE_SOURCE_CODE_HASH': 'hash-teste'}
+                      try:
+                          with patch.dict(os.environ, ambiente, clear=True), patch('subprocess.run', side_effect=consultar), contextlib.redirect_stdout(io.StringIO()):
+                              exec(compile(codigo, 'tfvars-do-workflow', 'exec'), {})
+                      except ValueError:
+                          assert falha, 'Cenário válido rejeitado.'
+                      else:
+                          assert not falha, 'Cenário inseguro foi aceito.'
+                          values = json.loads((Path(pasta) / 'zz_ci.auto.tfvars.json').read_text(encoding='utf-8'))
+                          habilitado = flag == 'true' and acao != 'destroy'
+                          assert values['clientes_api_habilitada' if auth else 'clientes_internos_habilitado'] == habilitado
+                          if acao == 'destroy':
+                              assert not chamadas, 'Destroy não pode depender de novos contratos ou secrets.'
+                          if auth and habilitado:
+                              assert values['connection_string'] == ''
+                              assert values['clientes_api_endereco_base'] == 'http://internal-teste.elb.us-east-1.amazonaws.com'
+                              assert not any(a[1] == 'secretsmanager' for a in chamadas), 'Modo privado não pode ler a credencial SQL.'
+          print('Contratos privados: ativação, isolamento de credenciais, dependências e destroy validados sem AWS.')
+          TESTAR_CLIENTES
+
+      - name: "🔐 Testar migração e preservação dos snapshots"
+        run: |
+          node <<'TESTAR_MIGRACAO_ESTADOS'
+          const fs = require('node:fs'),
+            path = require('node:path'),
+            os = require('node:os'),
+            crypto = require('node:crypto'),
+            assert = require('node:assert/strict'),
+            Module = require('node:module'),
+            cp = require('node:child_process');
+          const workflow = fs.readFileSync('.github/workflows/proteger-states-legados.yml', 'utf8').replace(/\r/g, '');
+          const bloco = workflow.match(
+            /          cat > "\$RUNNER_TEMP\/migrar-cache-legado.cjs" <<'MIGRAR_CACHE_LEGADO'\n([\s\S]*?)          MIGRAR_CACHE_LEGADO/
+          );
+          assert(bloco);
+          const codigo = bloco[1]
+            .split('\n')
+            .map((l) => l.slice(10))
+            .join('\n');
+          const arquivo = path.join(process.cwd(), 'migracao-teste.cjs'),
+            m = new Module(arquivo);
+          m.paths = module.paths;
+          m._compile(codigo, arquivo);
+          const h = m.exports;
+          const repo = 'oficina-mecanica-soat/' + path.basename(process.cwd());
+          const prefix = repo.endsWith('execucao')
+            ? 'execucao-tfstate-'
+            : repo.endsWith('auth-lambda')
+              ? 'tfstate-auth-lambda-'
+              : 'tfstate-';
+          const cache = (id, key, ref = 'refs/heads/develop') => ({
+            id,
+            key,
+            ref,
+            created_at: `2026-11-${String(id).padStart(2, '0')}T00:00:00Z`
+          });
+          const antigo = cache(1, prefix + '123456789012-development-100-1');
+          const atual = cache(2, prefix + '123456789012-development-101-1');
+          const legado = cache(3, prefix + 'development-90-1');
+          let selecao = h.selecionar(
+            [
+              antigo,
+              atual,
+              legado,
+              cache(4, 'Linux-nuget'),
+              cache(5, prefix + '123456789012-development-102-1', 'refs/pull/1/merge')
+            ],
+            [],
+            repo
+          );
+          assert.equal(selecao.length, 3);
+          assert.deepEqual(
+            selecao.filter((c) => c.active).map((c) => c.id),
+            [2]
+          );
+          assert(
+            h
+              .selecionar(
+                [antigo, atual],
+                [{ ref: 'refs/heads/develop', key: 'tfstate-enc-v1-123456789012-development-200-1' }],
+                repo
+              )
+              .every((c) => !c.active)
+          );
+          assert.throws(() => h.selecionar([cache(-1, atual.key)], [], repo));
+          assert.throws(() => h.selecionar([], [], 'outro/' + repo.split('/')[1]));
+          const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oficina-migracao-segura-'));
+          const originalExec = cp.execFileSync;
+          try {
+            const tf = path.join(dir, 'tf'),
+              temporario = path.join(dir, 'runner');
+            fs.mkdirSync(tf);
+            fs.mkdirSync(temporario);
+            const env = {
+              GITHUB_REPOSITORY: repo,
+              TF_WORKING_DIRECTORY: tf,
+              RUNNER_TEMP: temporario,
+              TERRAFORM_STATE_KEY: crypto.randomBytes(32).toString('hex'),
+              AWS_ACCOUNT_ID: '123456789012',
+              SSM_ENVIRONMENT_NAME: 'development',
+              LEGACY_ID: '2',
+              LEGACY_KEY: atual.key,
+              ATIVAR_CACHE: 'true'
+            };
+            const bytes = JSON.stringify({ version: 4, resources: [], teste: 'segredo-sintetico-sem-valor-real' });
+            fs.writeFileSync(path.join(tf, 'terraform.tfstate'), bytes);
+            fs.writeFileSync(path.join(tf, 'terraform.tfstate.backup'), bytes + '\n');
+            const comandos = [];
+            cp.execFileSync = (cmd, args) => {
+              assert.equal(cmd, 'gh');
+              comandos.push(args);
+              if (args.includes('DELETE')) return '';
+              return JSON.stringify([{ actions_caches: [atual] }]);
+            };
+            assert.throws(() => h.main('cleanup', env));
+            assert.equal(comandos.length, 0);
+            h.main('seal', env);
+            const cifrado = fs.readFileSync(path.join(temporario, 'legacy-state.bundle.enc'));
+            assert(!cifrado.toString().includes('segredo-sintetico'));
+            const remoto = {};
+            for (const n of ['terraform.tfstate.enc', 'terraform.tfstate.backup.enc'])
+              remoto[n] = fs.readFileSync(path.join(tf, n));
+            const backup = path.join(temporario, 'restaurado', '2');
+            fs.mkdirSync(backup, { recursive: true });
+            fs.writeFileSync(path.join(backup, 'legacy-state.bundle.enc'), cifrado);
+            h.main('clear-local', env);
+            assert(!fs.existsSync(path.join(tf, 'terraform.tfstate')));
+            assert.throws(() => h.main('verify', env));
+            assert.equal(comandos.length, 0);
+            for (const [n, b] of Object.entries(remoto)) fs.writeFileSync(path.join(tf, n), b);
+            h.main('verify', env);
+            assert.equal(fs.readFileSync(path.join(tf, 'terraform.tfstate'), 'utf8'), bytes);
+            h.main('cleanup', env);
+            assert.equal(comandos.filter((c) => c.includes('DELETE')).length, 1);
+            assert(comandos.at(-1).at(-1).endsWith('/actions/caches/2'));
+            assert.throws(() =>
+              h.main('verify', { ...env, TERRAFORM_STATE_KEY: crypto.randomBytes(32).toString('hex') })
+            );
+          } finally {
+            cp.execFileSync = originalExec;
+            assert(path.resolve(dir).startsWith(path.resolve(os.tmpdir()) + path.sep + 'oficina-migracao-segura-'));
+            fs.rmSync(dir, { recursive: true, force: true });
+          }
+          assert(workflow.indexOf('Conferir backup e snapshot') < workflow.indexOf('Remover apenas o cache legado'));
+          assert(workflow.includes('retention-days: 90'));
+          assert(!/configure-aws-credentials|terraform apply|terraform destroy|kubectl apply/.test(workflow));
+          console.log(
+            'Migração real: seleção do snapshot, ausência de adoção do legado, backup/restore exato e remoção condicionada aprovados; nenhuma chamada remota.'
+          );
+          TESTAR_MIGRACAO_ESTADOS
+
+      - name: "🔐 Testar proteção real de states e planos"
+        run: |
+          node <<'TESTAR_PROTECAO_ESTADOS'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const os = require('node:os');
+          const crypto = require('node:crypto');
+          const assert = require('node:assert/strict');
+          const Module = require('node:module');
+          const origem = fs.readFileSync('.github/workflows/aws-deploy.yml', 'utf8').replace(/\r/g, '');
+          assert.match(origem, /^  SSM_ENVIRONMENT_NAME: development$/m, 'O workflow deve fornecer o ambiente real da proteção.');
+          const bloco = origem.match(
+            /          cat > "\$RUNNER_TEMP\/proteger-estados.cjs" <<'PROTEGER_ESTADOS'\n([\s\S]*?)          PROTEGER_ESTADOS/
+          );
+          assert(bloco, 'Proteção literal ausente.');
+          const codigo = bloco[1]
+            .split('\n')
+            .map((l) => l.slice(10))
+            .join('\n');
+          const modulo = new Module(path.join(process.cwd(), 'protecao-temporaria.cjs'));
+          modulo.paths = module.paths;
+          modulo._compile(codigo, path.join(process.cwd(), 'protecao-temporaria.cjs'));
+          const p = modulo.exports;
+          const repo = 'oficina-mecanica-soat/' + path.basename(process.cwd());
+          const chave = crypto.randomBytes(32).toString('hex');
+          const env = {
+            AWS_REGION: 'us-east-1',
+            GITHUB_REPOSITORY: repo,
+            AWS_ACCOUNT_ID: '123456789012',
+            SSM_ENVIRONMENT_NAME: origem.match(/^  SSM_ENVIRONMENT_NAME: (.+)$/m)?.[1],
+            GITHUB_RUN_ID: '123',
+            GITHUB_RUN_ATTEMPT: '1',
+            GITHUB_SHA: 'a'.repeat(40),
+            TERRAFORM_ACTION: 'apply',
+            TERRAFORM_STATE_KEY: chave
+          };
+          const key = p.chave(chave),
+            segredo = 'segredo-sintetico-nao-real';
+          const aad = p.contexto(env, 'plan');
+          const cifrado = p.selar(Buffer.from(segredo), key, aad);
+          assert(!cifrado.includes(segredo));
+          assert.equal(p.abrir(cifrado, key, aad).toString(), segredo);
+          for (const alteracao of [
+            { GITHUB_REPOSITORY: 'oficina-mecanica-soat/outro' },
+            { AWS_ACCOUNT_ID: '999999999999' },
+            { GITHUB_RUN_ID: '124' },
+            { GITHUB_RUN_ATTEMPT: '2' },
+            { GITHUB_SHA: 'b'.repeat(40) },
+            { TERRAFORM_ACTION: 'destroy' },
+            { AWS_REGION: 'us-west-2' }
+          ]) {
+            assert.throws(() => p.abrir(cifrado, key, p.contexto({ ...env, ...alteracao }, 'plan')));
+          }
+          assert.throws(() => p.abrir(cifrado, crypto.randomBytes(32), aad));
+          const adulterado = JSON.parse(cifrado);
+          adulterado.dados = Buffer.from('adulterado').toString('base64');
+          assert.throws(() => p.abrir(JSON.stringify(adulterado), key, aad));
+          for (const invalida of ['', 'a'.repeat(63), 'g'.repeat(64)]) assert.throws(() => p.chave(invalida));
+          const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oficina-protecao-estados-'));
+          try {
+            const ambiente = { ...env, TF_WORKING_DIRECTORY: dir };
+            const estado = JSON.stringify({
+              version: 4,
+              serial: 2,
+              lineage: 'somente-teste',
+              outputs: {},
+              resources: [],
+              teste: segredo
+            });
+            fs.writeFileSync(path.join(dir, 'terraform.tfstate'), estado);
+            p.main('state-seal', ambiente);
+            assert(!fs.readFileSync(path.join(dir, 'terraform.tfstate.enc'), 'utf8').includes(segredo));
+            assert.throws(() => p.main('state-open', ambiente));
+            fs.unlinkSync(path.join(dir, 'terraform.tfstate'));
+            p.main('state-open', ambiente);
+            assert.equal(fs.readFileSync(path.join(dir, 'terraform.tfstate'), 'utf8'), estado);
+            fs.writeFileSync(path.join(dir, 'tfplan'), Buffer.from([0, 1, 2, 3, 255]));
+            fs.writeFileSync(path.join(dir, 'execucao-destroy-context.json'), '{}');
+            p.main('plan-seal', ambiente);
+            fs.unlinkSync(path.join(dir, 'tfplan'));
+            p.main('plan-open', ambiente);
+            assert.deepEqual(fs.readFileSync(path.join(dir, 'tfplan')), Buffer.from([0, 1, 2, 3, 255]));
+            assert.throws(() => p.main('plan-open', { ...ambiente, GITHUB_RUN_ATTEMPT: '2' }));
+          } finally {
+            assert(path.resolve(dir).startsWith(path.resolve(os.tmpdir()) + path.sep + 'oficina-protecao-estados-'));
+            fs.rmSync(dir, { recursive: true, force: true });
+          }
+          const steps = origem.split(/^      - /m).slice(1);
+          for (const step of steps.filter((s) => /uses: actions\/cache\/(restore|save)@/.test(s))) {
+            assert(step.includes('tfstate-enc-v1-'));
+            assert(!/\/terraform\.tfstate(?:\.backup)?\n/.test(step));
+            if (step.includes('cache/save')) assert(/outcome == 'success'/.test(step));
+          }
+          for (const step of steps.filter(
+            (s) => s.includes('uses: actions/upload-artifact@') && /name: tfplan-/.test(s)
+          ))
+            assert(step.includes('/tfplan.bundle.enc'));
+          console.log(
+            'Proteção real: roundtrip, sigilo, adulteração, chave/escopo/tentativa/ação e fronteiras de publicação aprovados.'
+          );
+          TESTAR_PROTECAO_ESTADOS
 
       - name: "🎨 03 · Verificar formatação Terraform"
         run: terraform fmt -check -recursive infra/terraform
@@ -344,6 +856,9 @@ jobs:
 
       - name: "🔍 05 · Validar configuração Terraform"
         run: terraform -chdir="$TF_WORKING_DIRECTORY" validate
+
+      - name: "🧪 06 · Validar isolamento Terraform de clientes"
+        run: terraform -chdir="$TF_WORKING_DIRECTORY" test
 
   package_lambda:
     name: "📦 06 · Empacotar Lambda"

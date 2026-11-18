@@ -18,6 +18,11 @@ data "aws_ssm_parameter" "rds_security_group_id" {
   name = "${var.rds_ssm_prefix}/security_group_id"
 }
 
+data "aws_ssm_parameter" "internal_nlb_security_group_id" {
+  count = var.clientes_api_habilitada ? 1 : 0
+  name  = "${var.kubernetes_ssm_prefix}/internal_nlb_security_group_id"
+}
+
 resource "terraform_data" "vpc_ready" {
   input = data.aws_ssm_parameter.vpc_status.value
 
