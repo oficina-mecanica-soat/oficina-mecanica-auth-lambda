@@ -2,7 +2,9 @@
 
 Autentica clientes por documento válido e ativo e emite JWT com perfil Cliente. No modo distribuído, consulta OS por HTTP privado com token técnico distinto do JWT, sem conexão direta ao SQL Server. API Gateway publica `POST /auth/documento`.
 
-## Arquitetura
+<a id="arquitetura"></a>
+
+## 🏗️ Arquitetura
 
 Domain valida o documento; Application coordena a autenticação; Infrastructure consulta o cadastro e assina o JWT; Function adapta o contrato do Gateway. O token contém a identidade do cliente, sem CPF/CNPJ. Os três microsserviços validam a mesma chave, issuer e audience; permissões continuam dependentes do perfil.
 
@@ -176,7 +178,9 @@ git diff --check
 
 <a id="git-flow-e-governanca"></a>
 
-## Operação e documentação
+<a id="operação-e-documentação"></a>
+
+## 🧭 Operação e documentação
 
 - [Visão geral, arquitetura e ordem das esteiras](https://github.com/oficina-mecanica-soat/oficina-mecanica-api#deploy-aws).
 - [Configuração, primeira aplicação e recuperação após Reset](https://github.com/oficina-mecanica-soat/oficina-mecanica-api/blob/develop/docs/deploy/deploy-aws.md).
