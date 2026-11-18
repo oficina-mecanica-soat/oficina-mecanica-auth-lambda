@@ -2,6 +2,18 @@
 
 Autentica clientes por documento válido e ativo e emite JWT com perfil Cliente. No modo distribuído, consulta OS por HTTP privado com token técnico distinto do JWT, sem conexão direta ao SQL Server. API Gateway publica `POST /auth/documento`.
 
+## 🏗️ Recursos provisionados por esta esteira
+
+| Recurso | Responsabilidade |
+| --- | --- |
+| Função Lambda e configuração de VPC | Publicar o pacote .NET validado e conectar a função às subnets privadas existentes |
+| Security group da função e regras de tráfego | No modo distribuído, permitir a consulta de clientes pelo listener 80 do NLB; as regras SQL são exclusivas do modo legado |
+| Log group CloudWatch | Registrar logs da função com a retenção configurada |
+| Secret da API key Datadog e layers configuradas na função | Preparar a instrumentação; ingestão completa da Lambda continua sendo uma limitação documentada |
+| Parâmetros SSM `auth-lambda/{function_arn,function_name,security_group_id}` e `status/auth-lambda` | Compartilhar identificação/prontidão da função com consumidores |
+
+A LabRole é uma role existente do laboratório, apenas consultada e associada à função; esta esteira não a cria. Não cria banco, EKS, NLB ou API Gateway. Consome a consulta privada da API de OS e publica a função que o Gateway integra. Fonte: [`infra/terraform/environments/dev`](infra/terraform/environments/dev).
+
 <a id="arquitetura"></a>
 
 ## 🏗️ Arquitetura
