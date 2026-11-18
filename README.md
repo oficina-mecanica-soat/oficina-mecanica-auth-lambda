@@ -1,146 +1,25 @@
 # 🔐 Oficina Mecânica Auth Lambda
 
-Serviço serverless responsável por autenticar clientes por documento e emitir JWT para integração com a API da Oficina Mecânica.
+Autentica clientes por documento válido e ativo e emite JWT com perfil Cliente. No modo distribuído, consulta OS por HTTP privado com token técnico distinto do JWT, sem conexão direta ao SQL Server. API Gateway publica `POST /auth/documento`.
 
-Este repositório faz parte da **Fase 3 do Tech Challenge FIAP** e evolui a arquitetura da solução separando a autenticação de cliente em uma Lambda própria, sem transferir a posse do schema, das migrations ou das regras gerais do domínio da API principal.
+## 🏗️ Recursos provisionados por esta esteira
 
----
-
-## 📌 Índice
-
-- [✨ Visão geral](#visao-geral)
-- [🎯 Objetivo da Lambda](#objetivo-da-lambda)
-- [🏗️ Arquitetura](#arquitetura)
-- [🧰 Tecnologias](#tecnologias)
-- [📁 Estrutura do repositório](#estrutura-do-repositorio)
-- [🔁 Fluxo de autenticação](#fluxo-de-autenticacao)
-- [📡 Contrato HTTP esperado](#contrato-http-esperado)
-- [⚙️ Variáveis de ambiente](#variaveis-de-ambiente)
-- [🔒 Segurança](#seguranca)
-- [🧪 Testes e qualidade](#testes-e-qualidade)
-- [🌿 Git Flow e governança](#git-flow-e-governanca)
-- [📍 Status atual](#status-atual)
-- [🗺️ Próximos passos](#proximos-passos)
-- [📝 Observações](#observacoes)
-
----
-
-<a id="visao-geral"></a>
-
-## ✨ Visão geral
-
-A Auth Lambda complementa o ecossistema da Oficina Mecânica com um fluxo de autenticação específico para clientes. O serviço recebe um CPF/CNPJ, valida o documento, consulta o cliente na base de Atendimento e, quando o cliente está ativo, emite um token JWT compatível com a API principal.
-
-| Responsabilidade | Descrição |
+| Recurso | Responsabilidade |
 | --- | --- |
-| 🔐 Autenticação | Autentica clientes por CPF/CNPJ. |
-| 🧾 Consulta | Lê dados mínimos do cliente na base de Atendimento. |
-| 🎫 Token | Emite JWT com `sub`, `role`, `jti` e `cliente_id`. |
-| 🧱 Integração | Atende o `POST /auth/documento` exposto pelo API Gateway. |
+| Função Lambda e configuração de VPC | Publicar o pacote .NET validado e conectar a função às subnets privadas existentes |
+| Security group da função e regras de tráfego | No modo distribuído, permitir a consulta de clientes pelo listener 80 do NLB; as regras SQL são exclusivas do modo legado |
+| Log group CloudWatch | Registrar logs da função com a retenção configurada |
+| Secret da API key Datadog e layers configuradas na função | Preparar a instrumentação; ingestão completa da Lambda continua sendo uma limitação documentada |
+| Parâmetros SSM `auth-lambda/{function_arn,function_name,security_group_id}` e `status/auth-lambda` | Compartilhar identificação/prontidão da função com consumidores |
 
----
-
-<a id="objetivo-da-lambda"></a>
-
-## 🎯 Objetivo da Lambda
-
-O objetivo deste serviço é autenticar clientes por documento, sem duplicar regras ou ownership da API principal.
-
-Este repo cuida de:
-
-- receber uma requisição HTTP roteada pelo API Gateway;
-- autenticar o cliente por CPF/CNPJ;
-- consultar o cliente na base de Atendimento;
-- validar se o cliente está ativo;
-- emitir JWT HMAC-SHA256 para consumo pela `oficina-mecanica-api`;
-- retornar respostas HTTP padronizadas.
-
-O repositório também mantém a infraestrutura e o deploy da Lambda. VPC, RDS e API Gateway permanecem em esteiras próprias e são consumidos por contratos SSM.
-
----
+A LabRole é uma role existente do laboratório, apenas consultada e associada à função; esta esteira não a cria. Não cria banco, EKS, NLB ou API Gateway. Consome a consulta privada da API de OS e publica a função que o Gateway integra. Fonte: [`infra/terraform/environments/dev`](infra/terraform/environments/dev).
 
 <a id="arquitetura"></a>
 
 ## 🏗️ Arquitetura
 
-O projeto segue **Clean Architecture** e preserva os bounded contexts usados no repositório principal, especialmente **Identidade** e **Atendimento**.
+Domain valida o documento; Application coordena a autenticação; Infrastructure consulta o cadastro e assina o JWT; Function adapta o contrato do Gateway. O token contém a identidade do cliente, sem CPF/CNPJ. Os três microsserviços validam a mesma chave, issuer e audience; permissões continuam dependentes do perfil.
 
-| Camada | Projeto | Responsabilidade |
-| --- | --- | --- |
-| ⚡ **Function** | `OficinaMecanica.AuthLambda.Function` | Adaptador Lambda, serialização JSON, mapeamento HTTP, inicialização da Lambda, injeção de dependências e tratamento sanitizado de erros. |
-| 🧠 **Application** | `OficinaMecanica.AuthLambda.Application` | Use case de autenticação, contratos, validação, `Result<T>` e respostas de aplicação. |
-| 💎 **Domain** | `OficinaMecanica.AuthLambda.Domain` | Value Object `CpfCnpj`, validação de CPF/CNPJ, mensagens e enums do contexto Atendimento. |
-| 🧱 **Infrastructure** | `OficinaMecanica.AuthLambda.Infrastructure` | Repository SQL parametrizado, geração de JWT, `JwtOptions` e integrações técnicas. |
-
-### Decisões aplicadas
-
-| Decisão | Aplicação prática |
-| --- | --- |
-| **Lambda dedicada** | A autenticação de cliente por documento fica isolada em um serviço serverless. |
-| **API dona do schema** | A Lambda consulta a base, mas não cria schema, migrations ou seeds. |
-| **Clean Architecture** | Dependências apontam para dentro; Domain não depende de Infrastructure ou Function. |
-| **DDD tático** | CPF/CNPJ é validado no domínio por Value Object. |
-| **Use Case** | A regra de autenticação fica centralizada na camada Application. |
-| **JWT compatível com a API** | Token emitido com issuer `oficina-mecanica-auth` e audience `oficina-mecanica-api`. |
-
----
-
-<a id="tecnologias"></a>
-
-## 🧰 Tecnologias
-
-| Categoria | Tecnologias |
-| --- | --- |
-| Linguagem e plataforma | C#, .NET 10 |
-| Serverless | AWS Lambda |
-| Entrada HTTP planejada | Amazon API Gateway |
-| Banco de dados | SQL Server |
-| Acesso a dados | Microsoft.Data.SqlClient |
-| Segurança | JWT HMAC-SHA256 |
-| Validação | FluentValidation |
-| Testes | xUnit, FluentAssertions, Moq e Coverlet |
-| Qualidade | `dotnet format`, cobertura de testes e checagem de pacotes vulneráveis |
-| Governança | Git Flow e GitHub Rulesets |
-
----
-
-<a id="estrutura-do-repositorio"></a>
-
-## 📁 Estrutura do repositório
-
-```text
-.
-├── src/
-│   ├── OficinaMecanica.AuthLambda.Function/
-│   ├── OficinaMecanica.AuthLambda.Application/
-│   ├── OficinaMecanica.AuthLambda.Domain/
-│   └── OficinaMecanica.AuthLambda.Infrastructure/
-├── tests/
-│   ├── OficinaMecanica.AuthLambda.Application.UnitTests/
-│   ├── OficinaMecanica.AuthLambda.Domain.UnitTests/
-│   └── OficinaMecanica.AuthLambda.Function.UnitTests/
-└── OficinaMecanica.AuthLambda.slnx
-```
-
----
-
-<a id="fluxo-de-autenticacao"></a>
-
-## 🔁 Fluxo de autenticação
-
-1. Lambda recebe JSON com `documento`.
-2. Function desserializa o body e chama o use case.
-3. Application valida a requisição.
-4. Domain normaliza e valida CPF/CNPJ.
-5. Infrastructure consulta o cliente em `Atendimento.Clientes`.
-6. Se o cliente existir e estiver ativo, o TokenService gera o JWT.
-7. Function retorna a resposta HTTP padronizada.
-
-Clientes inexistentes e clientes inativos retornam a mesma resposta, evitando diferenciar publicamente esses estados.
-
----
-
-<a id="contrato-http-esperado"></a>
 
 ## 📡 Contrato HTTP esperado
 
@@ -245,13 +124,15 @@ Crie os itens abaixo em **Settings > Environments > development**:
 
 O ambiente VocLabs fornece a `LabRole`; este repositório apenas consulta e associa essa role à função. Ele não cria nem gerencia policies IAM da role externa.
 
+Além da tabela, configurar `TERRAFORM_STATE_KEY`, `AUTH_LAMBDA_JWT_ISSUER`, `AUTH_LAMBDA_JWT_AUDIENCE`, `CLIENTES_INTERNOS_TOKEN` e `CLIENTES_API_ENABLED=true` para a consulta privada. `AUTH_LAMBDA_JWT_SECRET` precisa corresponder a `JWT_SECRET` dos três serviços. Preservar a chave de proteção do state; não rotacionar como tentativa de corrigir restauração.
+
 ### Deploy, destroy e validação
 
 O merge em `develop` chama o workflow AWS quando há mudança deployável. `infra/terraform/environments/dev/terraform-action.env` controla `apply` ou `destroy`; destroy deve ocorrer em PR dedicado. Após `apply`, a esteira valida configuração, VPC, layers, secret Datadog e contratos SSM. Após `destroy`, confirma a remoção da função e dos contratos próprios.
 
 A Lambda publica `/oficina-mecanica/development/auth-lambda/function_arn`, `function_name` e `/oficina-mecanica/development/status/auth-lambda`. No fluxo distribuído, `CLIENTES_API_ENABLED=true` consulta clientes pela API privada e remove a conexão SQL da função; a credencial técnica é distinta do JWT. O modo SQL é legado.
 
-Seu apply vem depois da API com consulta privada disponível e antes do Gateway. O JWT precisa ser aceito pelos três serviços. Seguir a [ordem canônica das oito esteiras](https://github.com/oficina-mecanica-soat/oficina-mecanica-api#deploy-aws); não aplicar Terraform localmente.
+Seu apply vem depois da API com consulta privada disponível e antes do Gateway. O JWT precisa ser aceito pelos três serviços. Seguir a [ordem de referência das oito esteiras](https://github.com/oficina-mecanica-soat/oficina-mecanica-api#deploy-aws); não aplicar Terraform localmente.
 
 ---
 
@@ -309,113 +190,16 @@ git diff --check
 
 <a id="git-flow-e-governanca"></a>
 
-## 🌿 Git Flow e governança
+<a id="operação-e-documentação"></a>
 
-O fluxo esperado segue os demais repositórios da Fase 3:
+## 🧭 Operação e documentação
 
-```text
-branch de trabalho -> PR develop -> PR release -> PR main
-```
+- [Visão geral, arquitetura e ordem das esteiras](https://github.com/oficina-mecanica-soat/oficina-mecanica-api#deploy-aws).
+- [Configuração, primeira aplicação e recuperação após Reset](https://github.com/oficina-mecanica-soat/oficina-mecanica-api/blob/develop/docs/deploy/deploy-aws.md).
+- [Collection consolidada e ambientes Local/Development](https://github.com/oficina-mecanica-soat/oficina-mecanica-api/blob/develop/docs/evidencias/postman.md).
 
-Branches protegidas:
+Todo provisionamento, atualização e destroy na AWS ocorre pelas esteiras oficiais. O controle é `infra/terraform/environments/dev/terraform-action.env`; destroy exige alteração dedicada e verificação dos consumidores. `AWS_DEPLOY_ENABLED` autoriza a janela real, e `AUTO_PR_ENABLED` controla somente a abertura de promoções. Alterar uma Variable não dispara o CD.
 
-- `develop`
-- `release`
-- `release/*`
-- `main`
+Um ambiente disponível pode ser testado sem destroy. Sem estado compatível, alguns owners exigem primeiro uma recuperação por destroy dedicado com inventário vazio comprovado. Não apague recursos ou caches para contornar o bloqueio; consulte o guia antes de iniciar uma conta ou retomar um laboratório.
 
-Rulesets ativos:
-
-- **Aprovação de PR:** exige revisão humana, descarta aprovações antigas e exige aprovação do último push.
-- **Proteção Git Flow:** exige PR, resolução de conversas e bloqueia push direto, force push e deleção.
-
-Os workflows de CI/CD validam código, testes, Terraform e o fluxo de branches antes das promoções.
-
----
-
-<a id="status-atual"></a>
-
-## 📍 Status atual
-
-| Item | Status |
-| --- | --- |
-| Código da Auth Lambda | ✅ Implementado |
-| Testes unitários | ✅ Implementados |
-| Rulesets Git Flow | ✅ Configurados |
-| CI/CD | ✅ Implementado |
-| Infraestrutura Lambda | ✅ Implementada |
-| API Gateway | ✅ Integrado por contrato |
-| Deploy AWS | ✅ Pipeline implementado |
-| Integração com RDS/API Gateway | ✅ Implementada |
-| Telemetria Datadog da Lambda | ⚠️ Instrumentada; ingestão não evidenciada no ambiente acadêmico |
-
----
-
-<a id="proximos-passos"></a>
-
-## 🗺️ Evoluções pós-entrega
-
-- evidenciar a ingestão completa de logs e traces da Lambda no Datadog;
-- evoluir controles de observabilidade e segurança compatíveis com um ambiente de produção.
-
----
-
-<a id="observacoes"></a>
-
-## 📝 Observações
-
-- Os ambientes `release` e `main` representam promoções lógicas; o ambiente físico AWS da entrega é `development`.
-- Não versionar secrets, connection strings reais, tokens, senhas ou credenciais AWS.
-- A API principal continua dona do schema, das migrations, dos seeds e das regras gerais de domínio.
-- A Auth Lambda não referencia o projeto da API principal.
-- Documentação central e arquitetura completa: [README da Oficina Mecânica API](https://github.com/oficina-mecanica-soat/oficina-mecanica-api).
-
-### Reconciliação de destroy após reset do laboratório
-
-O destroy restaura o cache Terraform existente e usa uma configuração temporária sem data sources de contratos SSM. O state original não é editado nem descartado: o provider confirma os recursos ausentes durante o plano de destruição. Somente o plano salvo, sem criação ou atualização, pode ser aplicado. Ao terminar, a esteira verifica que o state não contém recursos gerenciados antes de persistir o cache final. Falhas de autenticação, permissão ou rede bloqueiam a operação.
-
-Na API, vínculos Kubernetes só podem ser retirados por blocos declarativos removed com destroy=false após ResourceNotFoundException confirmar que o EKS registrado no state não existe. Com EKS existente, permanece a configuração normal de destroy. Não há uso de state rm, import ou mv.
-
-O retorno isolado de terraform-action.env para apply ainda é reconhecido como mudança de infraestrutura pelo detector de CD; não faça esse retorno enquanto não existir separação segura entre rearmar e provisionar. Preserve destroy após a reconciliação e só autorize nova subida em tarefa própria.
-
-#### State isolado por conta AWS
-
-As chaves de cache incluem o ID da conta retornado pela autenticação AWS, antes do ambiente e da execução. A restauração só pesquisa esse escopo, sem fallback para chaves históricas sem conta. Os caches anteriores permanecem preservados como histórico do laboratório encerrado 058264466885, inclusive quando contêm referências que a conta atual não consegue consultar. AccessDenied não é convertido em ausência.
-
-Sem cache no escopo atual, a esteira bloqueia apply. Um destroy dedicado só pode iniciar state novo depois de consultas read-only confirmarem que não existem recursos ou contratos do projeto na conta atual. Recursos internos do laboratório são preservados. Depois disso, o plano exclusivo de destroy e a validação de state vazio produzem o cache usado pelas próximas execuções da mesma conta. Em laboratório com recursos existentes e cache ausente, é necessário recuperar o state correto; o bootstrap não libera provisionamento automático.
-
-## Bloqueio de operação AWS — AUD-001
-
-`AWS_DEPLOY_ENABLED` deve existir no nível do repositório e permanecer `false` enquanto o laboratório estiver offline. Ausente, vazio ou diferente de `true` bloqueia a operação. O caller exige a habilitação antes de chamar o deploy; o workflow reutilizável repete a conferência no Environment e aceita operação física somente em `develop`/`development`, antes de resolver a ação e acessar AWS. Um override no Environment não substitui a habilitação do caller.
-
-Habilitar a variável não autoriza operação por si só: ainda exige janela combinada com Gabriel, laboratório/credenciais atuais, dependências e os guardrails existentes de plano salvo/state e destroy dedicado. Não altera JWT, rotas, recursos, contratos SSM ou `terraform-action.env`. Merge de código não implanta.
-
-O CI executa a barreira real com flags ausentes/inválidas, branches/tags e ambientes indevidos, além do caso positivo, sem credenciais ou comandos AWS. Testes e validações ficam inline nos workflows existentes, sem novas pastas de scripts. Nesta rodada, integrar somente em `develop`; Gabriel realiza o merge. Não promover release/main ou abrir nova janela de laboratório para este ajuste.
-
-## Promoção cumulativa — AUD-003
-
-A abertura/manutenção automática do PR `develop` → `release` compara todo o conteúdo implantável pendente, seguindo a regra já aprovada na API/Execução. Uma alteração documental não libera código/infraestrutura anterior sem operação confirmada. Detector e guarda compartilham os mesmos caminhos, preservando o escopo de deploy existente.
-
-A guarda exige sucesso da operação atual ou do CD do último commit implantável na linha principal de develop, incluindo o job de apply/destroy da tentativa atual. Deploy pulado/falho, rerun falho, histórico ausente ou erro de Git/GitHub bloqueiam; documentação após operação comprovada continua permitida. É conservadora quando a evidência exigida não está disponível. Não consulta AWS.
-
-Preserva `AWS_DEPLOY_ENABLED`, `AUTO_PR_ENABLED`, environments, plano salvo, state/cache, guardrails de destroy e merge humano. Não altera ancestralidade (PIPE-005), recursos, contratos SSM ou `terraform-action.env`. PRs existentes continuam sujeitos à revisão humana; a trava protege sua abertura/manutenção pelo CD. Nesta rodada, integrar somente em `develop`, sem promover release/main, sem implantação e com laboratório offline. Testes ficam inline no CI existente, sem novos arquivos ou pastas auxiliares.
-
-## Artefatos por tentativa — AUD-005
-
-Planos Terraform e, na Lambda, o pacote planejado usam `github.run_id` e `github.run_attempt` no nome de publicação/download. Os caches de state também usam conta AWS, ambiente, execução e tentativa. A restauração mantém o prefixo existente de conta/ambiente para recuperar state anterior, sem consultar caches de outra conta ou ambiente; não há fallback equivalente para planos/pacotes. O salvamento final com `always()` permanece para preservar state de apply/destroy parcialmente concluído. Nenhum cache antigo é apagado.
-
-Uma nova tentativa precisa gerar e publicar seus próprios artefatos. Reexecutar somente jobs falhos, mantendo o planejamento bem-sucedido de uma tentativa anterior, não fornece artefatos para a nova tentativa e deve bloquear o download. Para repetir o ciclo, reexecute todos os jobs e gere um novo plano a partir do state recuperado; não renomeie nem copie artefatos antigos nem pule o planejamento. Não é autorizada uma reexecução AWS por este ajuste.
-
-Testes inline verificam nomes de produtor/consumidor, isolamento entre tentativas/execuções/contas/ambientes, ausência de fallback silencioso de artefatos e preservação da configuração de state em falha. São verificações locais/simuladas, não prova de um rerun real de apply no laboratório. Mantém bloqueios AWS, environments, plano salvo, ação versionada, recursos e contratos. Sem novas pastas/arquivos auxiliares. Integrar somente em `develop`, com merge por Gabriel; laboratório offline, sem implantação ou promoção para release/main.
-
-### Consulta privada de clientes
-
-Com `ClientesApi__Habilitado=true`, a Infrastructure implementa `IClienteAutenticacaoRepository` com um cliente HTTP tipado. A Application mantém o mesmo caso de uso e a Function mantém `POST /auth/documento`, claims e respostas públicas. Não há fallback para SQL após uma falha HTTP: indisponibilidade, timeout ou resposta incompatível resultam em `503`; cliente inexistente e inativo continuam indistinguíveis em `401`. O cliente usa timeout de cinco segundos, limite de resposta, sem redirecionamentos e com headers ocultados dos logs.
-
-A consulta usa `POST /internal/v1/clientes/consultar-autenticacao` com identidade técnica segregada. Essa rota fica fora do proxy público `/api/{proxy+}`. Para o corte coordenado, configurar o mesmo Environment Secret `CLIENTES_INTERNOS_TOKEN` na API e nesta Lambda e habilitar a Environment Variable `CLIENTES_API_ENABLED` primeiro na API. Após implantação e validação da API, habilitar a variável na Lambda. A esteira deriva o endereço do listener interno publicado pelo Kubernetes, confere conta, região, VPC, porta e security group e valida a chamada pela própria Lambda após o apply.
-
-No modo privado, o Terraform não injeta connection string na Lambda e substitui suas regras SQL por acesso TCP/80 restrito ao security group do NLB. Os blocos `moved` preservam o endereço do state das regras legadas na transição. O modo legado permanece disponível somente para a implantação atual, até o corte; não constitui fallback automático. `destroy` independe da nova credencial e dos contratos privados. A ativação segue sujeita ao bloqueio AWS, à janela autorizada e aos demais guardrails da esteira.
-
-### Proteção de states e planos
-
-O Environment development exige `TERRAFORM_STATE_KEY`, chave exclusiva aleatória de 256 bits no formato hexadecimal. Não reutilizar JWT nem trocar essa chave enquanto houver backups dependentes dela. A esteira cifra states e planos antes da publicação; falha de autenticação bloqueia a restauração, sem fallback para cache legado. O workflow de migração preserva snapshots legados em artifacts cifrados de 90 dias e confere sua restauração antes de remover a cópia em claro, sem acessar AWS. Apenas o snapshot atual identificado por conta alimenta o cache operacional; históricos ficam arquivados. Consulte a RFC-0007 da API para contexto e recuperação.
+Fluxo Git: branch de trabalho → PR para `develop` → `release` → `main`. O CD físico ocorre em development; release e production registram promoções lógicas. PRs e merges permanecem sujeitos aos checks e à revisão. Mudanças somente em README/docs não exigem deploy físico pelos detectores atuais.
